@@ -41,8 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--analysis-model",
         type=str,
-        default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
-        help="HuggingFace model for video analysis (default: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8).",
+        default="Qwen/Qwen3-VL-30B-A3B-Instruct",
+        help="HuggingFace model for video analysis (default: Qwen/Qwen3-VL-30B-A3B-Instruct).",
     )
     parser.add_argument(
         "--planner-model",

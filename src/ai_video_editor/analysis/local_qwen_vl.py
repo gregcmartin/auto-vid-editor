@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 try:
     import torch
-    from transformers import AutoModel, AutoProcessor
+    from transformers import Qwen3VLMoeForConditionalGeneration, AutoProcessor
     from qwen_vl_utils import process_vision_info
 except ImportError:
     torch = None
-    AutoModel = None
+    Qwen3VLMoeForConditionalGeneration = None
     AutoProcessor = None
     process_vision_info = None
 
@@ -25,11 +25,11 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
         device: str = "auto",
         torch_dtype: str = "auto",
     ) -> None:
-        if AutoModel is None:
+        if Qwen3VLMoeForConditionalGeneration is None:
             raise ImportError(
                 "transformers and qwen-vl-utils are required for local inference. "
                 "Install with: pip install transformers qwen-vl-utils torch"
@@ -46,9 +46,19 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         if self.model is None:
             logger.info("Loading local model: %s", self.model_name)
             
+            # Set MPS high watermark for better memory management on Apple Silicon
+            import os
+            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+            
             # Determine torch dtype
             if self.torch_dtype == "auto":
-                dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+                # Use float16 for MPS (Apple Silicon), bfloat16 for CUDA, float32 for CPU
+                if torch.backends.mps.is_available():
+                    dtype = torch.float16
+                elif torch.cuda.is_available():
+                    dtype = torch.bfloat16
+                else:
+                    dtype = torch.float32
             elif self.torch_dtype == "bfloat16":
                 dtype = torch.bfloat16
             elif self.torch_dtype == "float16":
@@ -56,10 +66,14 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             else:
                 dtype = torch.float32
             
-            self.model = AutoModel.from_pretrained(
+            logger.info("Using dtype: %s, device: %s", dtype, self.device)
+            
+            # Use Accelerate for weight sharding to avoid single large buffer
+            self.model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
                 self.model_name,
-                torch_dtype=dtype,
-                device_map=self.device,
+                dtype=dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
+                device_map=self.device,  # Let Accelerate handle device placement
+                low_cpu_mem_usage=True,  # Reduce CPU memory usage during loading
                 trust_remote_code=True,
             )
             self.processor = AutoProcessor.from_pretrained(self.model_name)

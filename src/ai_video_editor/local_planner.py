@@ -46,9 +46,19 @@ class LocalDirectorPlanner:
         if self.model is None:
             logger.info("Loading local planner model: %s", self.model_name)
             
+            # Set MPS high watermark for better memory management on Apple Silicon
+            import os
+            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+            
             # Determine torch dtype
             if self.torch_dtype == "auto":
-                dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+                # Use float16 for MPS (Apple Silicon), bfloat16 for CUDA, float32 for CPU
+                if torch.backends.mps.is_available():
+                    dtype = torch.float16
+                elif torch.cuda.is_available():
+                    dtype = torch.bfloat16
+                else:
+                    dtype = torch.float32
             elif self.torch_dtype == "bfloat16":
                 dtype = torch.bfloat16
             elif self.torch_dtype == "float16":
@@ -56,10 +66,15 @@ class LocalDirectorPlanner:
             else:
                 dtype = torch.float32
             
+            logger.info("Using dtype: %s, device: %s", dtype, self.device)
+            
+            # Use Accelerate for weight sharding to avoid single large buffer
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                torch_dtype=dtype,
-                device_map=self.device,
+                dtype=dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
+                device_map=self.device,  # Let Accelerate handle device placement
+                low_cpu_mem_usage=True,  # Reduce CPU memory usage during loading
+                trust_remote_code=True,
             )
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             logger.info("Planner model loaded successfully")
