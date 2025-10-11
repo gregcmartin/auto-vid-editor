@@ -36,6 +36,15 @@ class AnalysisPipeline:
 
             if result.people:
                 people_index[chunk.name] = result.people
+            
+            # Clear MPS cache after each chunk to prevent memory buildup
+            try:
+                import torch
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                    logger.debug("Cleared MPS cache after chunk %s", chunk.name)
+            except Exception:
+                pass
 
         self._write_people_report(people_index)
 
@@ -75,4 +84,3 @@ class AnalysisPipeline:
                 lines.append("")
         self.people_report_path.parent.mkdir(parents=True, exist_ok=True)
         self.people_report_path.write_text("\n".join(lines).strip() + "\n")
-

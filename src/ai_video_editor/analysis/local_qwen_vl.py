@@ -48,7 +48,13 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             
             # Set MPS high watermark for better memory management on Apple Silicon
             import os
+            from pathlib import Path
             os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+            
+            # Setup offload directory for weight sharding
+            hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+            offload_dir = hf_home / "ai_video_editor_offload"
+            offload_dir.mkdir(parents=True, exist_ok=True)
             
             # Determine torch dtype
             if self.torch_dtype == "auto":
@@ -66,17 +72,36 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             else:
                 dtype = torch.float32
             
-            logger.info("Using dtype: %s, device: %s", dtype, self.device)
+            # Cap memory to force sharding across MPS+CPU instead of single huge buffer
+            max_memory = {
+                "mps": "46GiB",  # Leave headroom for video processing + Metal
+                "cpu": "48GiB",  # Rest goes to CPU RAM
+            }
             
-            # Use Accelerate for weight sharding to avoid single large buffer
+            logger.info("Using dtype: %s, device: %s, offload_dir: %s", dtype, self.device, offload_dir)
+            
+            # Use Accelerate for weight sharding with memory caps and offloading
             self.model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
                 self.model_name,
-                dtype=dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
-                device_map=self.device,  # Let Accelerate handle device placement
-                low_cpu_mem_usage=True,  # Reduce CPU memory usage during loading
                 trust_remote_code=True,
+                dtype=dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
+                low_cpu_mem_usage=True,  # Stream weights to avoid big spikes
+                device_map=self.device,  # Let Accelerate shard across mps/cpu
+                offload_folder=str(offload_dir),  # Push least-hot weights to SSD
+                max_memory=max_memory,  # Cap memory to avoid single giant buffer
             )
-            self.processor = AutoProcessor.from_pretrained(self.model_name)
+            
+            # Prefer SDPA attention (MPS-compatible)
+            if hasattr(self.model, "config"):
+                try:
+                    self.model.config.attn_implementation = "sdpa"
+                except Exception:
+                    pass
+            
+            self.processor = AutoProcessor.from_pretrained(
+                self.model_name,
+                trust_remote_code=True
+            )
             logger.info("Model loaded successfully")
 
     def analyze(self, video_path: Path) -> AnalysisResult:
