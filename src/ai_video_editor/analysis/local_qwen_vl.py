@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 try:
     import torch
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoModel, AutoProcessor
     from qwen_vl_utils import process_vision_info
 except ImportError:
     torch = None
-    Qwen2VLForConditionalGeneration = None
+    AutoModel = None
     AutoProcessor = None
     process_vision_info = None
 
@@ -25,11 +25,11 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2-VL-7B-Instruct",
+        model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         device: str = "auto",
         torch_dtype: str = "auto",
     ) -> None:
-        if Qwen2VLForConditionalGeneration is None:
+        if AutoModel is None:
             raise ImportError(
                 "transformers and qwen-vl-utils are required for local inference. "
                 "Install with: pip install transformers qwen-vl-utils torch"
@@ -56,10 +56,11 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             else:
                 dtype = torch.float32
             
-            self.model = Qwen2VLForConditionalGeneration.from_pretrained(
+            self.model = AutoModel.from_pretrained(
                 self.model_name,
                 torch_dtype=dtype,
                 device_map=self.device,
+                trust_remote_code=True,
             )
             self.processor = AutoProcessor.from_pretrained(self.model_name)
             logger.info("Model loaded successfully")

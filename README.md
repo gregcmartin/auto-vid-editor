@@ -20,9 +20,10 @@ Use Alibaba Cloud's API service:
 ## Ingredients
 
 ### Local Models (Recommended)
-- **Video analysis: `Qwen/Qwen3-VL-30B-A3B-Instruct` ONLY** (⚠️ This is the ONLY supported model for video analysis)
-- **Planning: `Qwen/Qwen3-30B-A3B` ONLY** (⚠️ This is the ONLY supported model for planning)
+- **Video analysis: `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` ONLY** (⚠️ FP8 quantized version - requires GPU)
+- **Planning: `Qwen/Qwen3-30B-A3B-MLX-8bit` ONLY** (⚠️ MLX 8-bit quantized for Apple Silicon)
 - Framework: [HuggingFace Transformers](https://huggingface.co/docs/transformers)
+- **Note**: These are Qwen3 models ONLY. Do not use Qwen2 models.
 
 ### DashScope API (Original)
 - Video analysis model: `Qwen/Qwen3-VL-30B-A3B-Instruct`

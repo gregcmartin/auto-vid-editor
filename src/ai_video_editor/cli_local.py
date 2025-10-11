@@ -41,13 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--analysis-model",
         type=str,
-        default="Qwen/Qwen3-VL-30B-A3B-Instruct",
-        help="HuggingFace model for video analysis (default: Qwen/Qwen3-VL-30B-A3B-Instruct).",
+        default="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        help="HuggingFace model for video analysis (default: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8).",
     )
     parser.add_argument(
         "--planner-model",
-        default="Qwen/Qwen3-30B-A3B",
-        help="HuggingFace model for planning (default: Qwen/Qwen3-30B-A3B).",
+        default="Qwen/Qwen3-30B-A3B-MLX-8bit",
+        help="HuggingFace model for planning (default: Qwen/Qwen3-30B-A3B-MLX-8bit).",
     )
     parser.add_argument(
         "--device",

@@ -94,11 +94,14 @@ ai-video-editor-local your_video.mp4 --torch-dtype float32
 
 ### Video Analysis Models
 
-**⚠️ IMPORTANT: This project ONLY uses `Qwen/Qwen3-VL-30B-A3B-Instruct` for video analysis. No exceptions!**
+**⚠️ IMPORTANT: This project ONLY uses `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` for video analysis. No exceptions!**
 
-Default: `Qwen/Qwen3-VL-30B-A3B-Instruct` (~30GB)
+Default: `Qwen/Qwen3-VL-30B-A3B-Instruct-FP8` (~15GB, FP8 quantized)
 
-This is the ONLY supported model for video analysis. Do not use other models.
+- **Requirements**: GPU with FP8 support (NVIDIA GPUs)
+- **Not compatible with**: Apple Silicon MPS (use API version instead)
+- This is the ONLY supported model for video analysis
+- **Do NOT use Qwen2 models** - only Qwen3 models are supported
 
 ```bash
 # This is the default - no need to specify
@@ -107,11 +110,14 @@ ai-video-editor-local your_video.mp4
 
 ### Planning Models
 
-**⚠️ IMPORTANT: This project ONLY uses `Qwen/Qwen3-30B-A3B` for planning. No exceptions!**
+**⚠️ IMPORTANT: This project ONLY uses `Qwen/Qwen3-30B-A3B-MLX-8bit` for planning. No exceptions!**
 
-Default: `Qwen/Qwen3-30B-A3B` (~30GB)
+Default: `Qwen/Qwen3-30B-A3B-MLX-8bit` (~8GB, MLX 8-bit quantized)
 
-This is the ONLY supported model for planning. Do not use other models.
+- **Optimized for**: Apple Silicon (M1/M2/M3)
+- **Memory efficient**: 8-bit quantization
+- This is the ONLY supported model for planning
+- **Do NOT use Qwen2 models** - only Qwen3 models are supported
 
 ```bash
 # This is the default - no need to specify

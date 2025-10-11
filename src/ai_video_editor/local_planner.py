@@ -23,7 +23,7 @@ class LocalDirectorPlanner:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+        model_name: str = "Qwen/Qwen3-30B-A3B-MLX-8bit",
         device: str = "auto",
         torch_dtype: str = "auto",
         max_context_chars: int = 12000,
