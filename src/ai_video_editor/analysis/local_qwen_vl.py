@@ -98,12 +98,22 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             with init_empty_weights():
                 self.model = AutoModelForVision2Seq.from_config(config, trust_remote_code=True)
             
-            # Step 3: Param-by-param dispatch from shards (streams weights directly to devices)
+            # Step 3: Download model to cache and get local path
+            from huggingface_hub import snapshot_download
+            logger.info("Downloading model to cache...")
+            model_path = snapshot_download(
+                repo_id=self.model_name,
+                allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model"],
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+            )
+            logger.info("Model cached at: %s", model_path)
+            
+            # Step 4: Param-by-param dispatch from shards (streams weights directly to devices)
             # This prevents any single 40-50 GiB contiguous buffer allocation
             logger.info("Loading and dispatching model weights from checkpoint shards...")
             self.model = load_checkpoint_and_dispatch(
                 self.model,
-                self.model_name,  # HF repo ID or path
+                model_path,  # Local path to cached model
                 device_map=self.device,  # Let Accelerate place MPS/CPU shards
                 dtype=dtype,
                 offload_folder=str(offload_dir),  # Push least-hot weights to SSD
