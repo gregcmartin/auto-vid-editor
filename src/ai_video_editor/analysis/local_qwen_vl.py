@@ -11,12 +11,16 @@ logger = logging.getLogger(__name__)
 
 try:
     import torch
-    from transformers import Qwen3VLMoeForConditionalGeneration, AutoProcessor
+    from transformers import AutoConfig, AutoProcessor, AutoModelForVision2Seq
+    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
     from qwen_vl_utils import process_vision_info
 except ImportError:
     torch = None
-    Qwen3VLMoeForConditionalGeneration = None
+    AutoConfig = None
     AutoProcessor = None
+    AutoModelForVision2Seq = None
+    init_empty_weights = None
+    load_checkpoint_and_dispatch = None
     process_vision_info = None
 
 
@@ -29,10 +33,10 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         device: str = "auto",
         torch_dtype: str = "auto",
     ) -> None:
-        if Qwen3VLMoeForConditionalGeneration is None:
+        if AutoModelForVision2Seq is None or init_empty_weights is None:
             raise ImportError(
-                "transformers and qwen-vl-utils are required for local inference. "
-                "Install with: pip install transformers qwen-vl-utils torch"
+                "transformers, accelerate, and qwen-vl-utils are required for local inference. "
+                "Install with: pip install transformers>=4.43.0 accelerate>=0.33.0 qwen-vl-utils torch"
             )
         
         self.model_name = model_name
@@ -80,23 +84,35 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             
             logger.info("Using dtype: %s, device: %s, offload_dir: %s", dtype, self.device, offload_dir)
             
-            # Use Accelerate for weight sharding with memory caps and offloading
-            self.model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
-                self.model_name,
-                trust_remote_code=True,
-                dtype=dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
-                low_cpu_mem_usage=True,  # Stream weights to avoid big spikes
-                device_map=self.device,  # Let Accelerate shard across mps/cpu
-                offload_folder=str(offload_dir),  # Push least-hot weights to SSD
-                max_memory=max_memory,  # Cap memory to avoid single giant buffer
-            )
+            # Step 1: Load config only (no weights)
+            config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
             
-            # Prefer SDPA attention (MPS-compatible)
-            if hasattr(self.model, "config"):
-                try:
-                    self.model.config.attn_implementation = "sdpa"
-                except Exception:
-                    pass
+            # Prefer SDPA attention (MPS-compatible) - set before model creation
+            try:
+                config.attn_implementation = "sdpa"
+            except Exception:
+                pass
+            
+            # Step 2: Build param-less module (no real tensors yet - avoids huge buffer allocation)
+            logger.info("Initializing model with empty weights...")
+            with init_empty_weights():
+                self.model = AutoModelForVision2Seq.from_config(config, trust_remote_code=True)
+            
+            # Step 3: Param-by-param dispatch from shards (streams weights directly to devices)
+            # This prevents any single 40-50 GiB contiguous buffer allocation
+            logger.info("Loading and dispatching model weights from checkpoint shards...")
+            self.model = load_checkpoint_and_dispatch(
+                self.model,
+                self.model_name,  # HF repo ID or path
+                device_map=self.device,  # Let Accelerate place MPS/CPU shards
+                dtype=dtype,
+                offload_folder=str(offload_dir),  # Push least-hot weights to SSD
+                max_memory=max_memory,  # Cap memory per device
+                no_split_module_classes=[  # Prevent bad mid-layer splits
+                    "QwenDecoderLayer", "QwenMLP", "QwenAttention",
+                    "VisionTransformerLayer", "QwenVisionBlock"
+                ],
+            )
             
             self.processor = AutoProcessor.from_pretrained(
                 self.model_name,
