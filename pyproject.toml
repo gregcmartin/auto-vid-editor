@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-video-editor"
+version = "0.1.0"
+description = "CLI tools for automating AI-assisted video post-production."
+authors = [{ name = "Greg Martin" }]
+requires-python = ">=3.10"
+dependencies = [
+    "dashscope>=1.14.0",
+    "qwen-agent>=0.0.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+local = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.37.0",
+    "accelerate>=0.26.0",
+    "qwen-vl-utils",
+]
+
+[project.scripts]
+ai-video-editor = "ai_video_editor.cli:main"
+ai-video-editor-local = "ai_video_editor.cli_local:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
