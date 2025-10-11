@@ -20,8 +20,8 @@ Use Alibaba Cloud's API service:
 ## Ingredients
 
 ### Local Models (Recommended)
-- Video analysis: `Qwen/Qwen2-VL-7B-Instruct` (or any HuggingFace vision model)
-- Planning: `Qwen/Qwen2.5-7B-Instruct` (or any HuggingFace text model)
+- Video analysis: Qwen3-VL-30B-A3B-Instruct
+- Planning: `Qwen/Qwen3-39B-Instruct` (or any HuggingFace text model)
 - Framework: [HuggingFace Transformers](https://huggingface.co/docs/transformers)
 
 ### DashScope API (Original)
