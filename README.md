@@ -75,7 +75,7 @@ Flags of note:
 - `--skip-analysis`, `--skip-planning`, `--skip-editing` let you resume partial runs.
 - `--font-path` points `drawtext` overlays to a specific font if the macOS default is unavailable.
 - `--music-dir` selects the folder of background loops to blend into segments.
-- `--use-file-picker` opens a Tk-based selector when you’d rather not pass the path on the CLI.
+- `--use-file-picker` opens a Tk-based selector when you'd rather not pass the path on the CLI.
 
 ## Development
 
