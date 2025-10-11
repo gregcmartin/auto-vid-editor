@@ -40,13 +40,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--analysis-model",
-        default="Qwen/Qwen2-VL-7B-Instruct",
-        help="HuggingFace model for video analysis (default: Qwen/Qwen2-VL-7B-Instruct).",
+        type=str,
+        default="Qwen/Qwen3-VL-30B-A3B-Instruct",
+        help="HuggingFace model for video analysis (default: Qwen/Qwen3-VL-30B-A3B-Instruct).",
     )
     parser.add_argument(
         "--planner-model",
-        default="Qwen/Qwen2.5-7B-Instruct",
-        help="HuggingFace model for planning (default: Qwen/Qwen2.5-7B-Instruct).",
+        default="Qwen/Qwen3-30B-A3B",
+        help="HuggingFace model for planning (default: Qwen/Qwen3-30B-A3B).",
     )
     parser.add_argument(
         "--device",

@@ -94,29 +94,28 @@ ai-video-editor-local your_video.mp4 --torch-dtype float32
 
 ### Video Analysis Models
 
-Default: `Qwen/Qwen2-VL-7B-Instruct`
+**⚠️ IMPORTANT: This project ONLY uses `Qwen/Qwen3-VL-30B-A3B-Instruct` for video analysis. No exceptions!**
 
-Other options:
-- `Qwen/Qwen2-VL-2B-Instruct` (smaller, faster, less accurate)
-- `Qwen/Qwen2-VL-72B-Instruct` (larger, slower, more accurate - requires 80GB+ VRAM)
+Default: `Qwen/Qwen3-VL-30B-A3B-Instruct` (~30GB)
+
+This is the ONLY supported model for video analysis. Do not use other models.
 
 ```bash
-ai-video-editor-local your_video.mp4 \
-  --analysis-model Qwen/Qwen2-VL-2B-Instruct
+# This is the default - no need to specify
+ai-video-editor-local your_video.mp4
 ```
 
 ### Planning Models
 
-Default: `Qwen/Qwen2.5-7B-Instruct`
+**⚠️ IMPORTANT: This project ONLY uses `Qwen/Qwen3-30B-A3B` for planning. No exceptions!**
 
-Other options:
-- `Qwen/Qwen2.5-3B-Instruct` (smaller, faster)
-- `Qwen/Qwen2.5-14B-Instruct` (larger, better)
-- `Qwen/Qwen2.5-32B-Instruct` (largest, best quality)
+Default: `Qwen/Qwen3-30B-A3B` (~30GB)
+
+This is the ONLY supported model for planning. Do not use other models.
 
 ```bash
-ai-video-editor-local your_video.mp4 \
-  --planner-model Qwen/Qwen2.5-3B-Instruct
+# This is the default - no need to specify
+ai-video-editor-local your_video.mp4
 ```
 
 ## Complete Example
