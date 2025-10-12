@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from .analysis.nexa_qwen_vl import NexaQwenVideoAnalyzer
+from .analysis.mlx_qwen_vl import MLXQwenVideoAnalyzer
 from .analysis.pipeline import AnalysisPipeline
 from .config import AppConfig
 from .editor import FFmpegEditor, VideoAssembler, FFmpegEditorError
@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--analysis-model",
         type=str,
         default="NexaAI/qwen3vl-30B-A3B-mlx",
-        help="NexaAI MLX model for video analysis (default: NexaAI/qwen3vl-30B-A3B-mlx).",
+        help="MLX model for video analysis (default: NexaAI/qwen3vl-30B-A3B-mlx).",
     )
     parser.add_argument(
         "--planner-model",
@@ -242,7 +242,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         logging.error("Video splitting failed: %s", exc)
         return 1
 
-    analyzer = NexaQwenVideoAnalyzer(
+    analyzer = MLXQwenVideoAnalyzer(
         model_name=args.analysis_model,
     )
     pipeline = AnalysisPipeline(
