@@ -6,6 +6,12 @@
       "transcript": null,
       "audio_highlights": [
         "Significant audio peak detected"
+      ],
+      "frames": [
+        "frames/chunk_04/chunk_04_s01_f01.jpg",
+        "frames/chunk_04/chunk_04_s01_f02.jpg",
+        "frames/chunk_04/chunk_04_s01_f03.jpg",
+        "frames/chunk_04/chunk_04_s01_f04.jpg"
       ]
     }
   ],

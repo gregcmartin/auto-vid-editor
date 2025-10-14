@@ -132,8 +132,9 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
                 self.model,
                 self.processor,
                 prompt,
-                sampler=make_sampler(temp=self.temperature, top_p=1.0),
                 max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                top_p=1.0,
                 **media_kwargs,
                 verbose=False,
             )

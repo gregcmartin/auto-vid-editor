@@ -5,8 +5,11 @@ import json
 import logging
 import sys
 import time
+import os
 from pathlib import Path
 from typing import Any, Callable, List, Optional
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from .analysis.base import VideoAnalyzer
 from .analysis.local_qwen_vl import LocalQwenVideoAnalyzer
@@ -467,6 +470,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
     configure_logging(args.log_level)
     start_time = time.perf_counter()
     try:
@@ -546,11 +551,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
         fallback_analyzer = None
         if isinstance(analyzer, MLXQwenVideoAnalyzer):
-            fallback_analyzer = LocalQwenVideoAnalyzer(
-                model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
-                device=args.device,
-                torch_dtype=args.torch_dtype,
-            )
+        fallback_analyzer = LocalQwenVideoAnalyzer(
+            model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
+            device="cpu",
+            torch_dtype="float32",
+        )
         pipeline = AnalysisPipeline(
             analyzer=analyzer,
             analysis_dir=config.analysis_dir,

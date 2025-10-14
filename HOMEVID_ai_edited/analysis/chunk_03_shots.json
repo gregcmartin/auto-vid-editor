@@ -7,6 +7,12 @@
       "audio_highlights": [
         "Significant audio peak detected",
         "High dynamic range audio"
+      ],
+      "frames": [
+        "frames/chunk_03/chunk_03_s01_f01.jpg",
+        "frames/chunk_03/chunk_03_s01_f02.jpg",
+        "frames/chunk_03/chunk_03_s01_f03.jpg",
+        "frames/chunk_03/chunk_03_s01_f04.jpg"
       ]
     }
   ],
