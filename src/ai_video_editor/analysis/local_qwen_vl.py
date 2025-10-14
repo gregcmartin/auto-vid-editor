@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from .base import AnalysisResult, PersonProfile, TimelineMoment, VideoAnalyzer
 
@@ -11,16 +11,12 @@ logger = logging.getLogger(__name__)
 
 try:
     import torch
-    from transformers import AutoConfig, AutoProcessor, AutoModelForVision2Seq
-    from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+    from transformers import AutoProcessor, AutoModelForImageTextToText
     from qwen_vl_utils import process_vision_info
 except ImportError:
     torch = None
-    AutoConfig = None
     AutoProcessor = None
-    AutoModelForVision2Seq = None
-    init_empty_weights = None
-    load_checkpoint_and_dispatch = None
+    AutoModelForImageTextToText = None
     process_vision_info = None
 
 
@@ -33,10 +29,10 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         device: str = "auto",
         torch_dtype: str = "auto",
     ) -> None:
-        if AutoModelForVision2Seq is None or init_empty_weights is None:
+        if AutoModelForImageTextToText is None or torch is None:
             raise ImportError(
-                "transformers, accelerate, and qwen-vl-utils are required for local inference. "
-                "Install with: pip install transformers>=4.43.0 accelerate>=0.33.0 qwen-vl-utils torch"
+                "transformers, torch, and qwen-vl-utils are required for local inference. "
+                "Install with: pip install transformers>=4.43.0 qwen-vl-utils torch"
             )
         
         self.model_name = model_name
@@ -50,83 +46,35 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         if self.model is None:
             logger.info("Loading local model: %s", self.model_name)
             
-            # Set MPS high watermark for better memory management on Apple Silicon
-            import os
-            from pathlib import Path
-            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-            
-            # Setup offload directory for weight sharding
-            hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
-            offload_dir = hf_home / "ai_video_editor_offload"
-            offload_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Determine torch dtype
-            if self.torch_dtype == "auto":
-                # Use float16 for MPS (Apple Silicon), bfloat16 for CUDA, float32 for CPU
-                if torch.backends.mps.is_available():
-                    dtype = torch.float16
-                elif torch.cuda.is_available():
-                    dtype = torch.bfloat16
-                else:
-                    dtype = torch.float32
+            if self.torch_dtype == "float16":
+                dtype = torch.float16
             elif self.torch_dtype == "bfloat16":
                 dtype = torch.bfloat16
-            elif self.torch_dtype == "float16":
-                dtype = torch.float16
+            elif self.torch_dtype == "auto":
+                dtype = torch.float16 if torch.backends.mps.is_available() else torch.float32
             else:
                 dtype = torch.float32
-            
-            # Cap memory to force sharding across MPS+CPU instead of single huge buffer
-            max_memory = {
-                "mps": "46GiB",  # Leave headroom for video processing + Metal
-                "cpu": "48GiB",  # Rest goes to CPU RAM
-            }
-            
-            logger.info("Using dtype: %s, device: %s, offload_dir: %s", dtype, self.device, offload_dir)
-            
-            # Step 1: Load config only (no weights)
-            config = AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
-            
-            # Prefer SDPA attention (MPS-compatible) - set before model creation
-            try:
-                config.attn_implementation = "sdpa"
-            except Exception:
-                pass
-            
-            # Step 2: Build param-less module (no real tensors yet - avoids huge buffer allocation)
-            logger.info("Initializing model with empty weights...")
-            with init_empty_weights():
-                self.model = AutoModelForVision2Seq.from_config(config, trust_remote_code=True)
-            
-            # Step 3: Download model to cache and get local path
-            from huggingface_hub import snapshot_download
-            logger.info("Downloading model to cache...")
-            model_path = snapshot_download(
-                repo_id=self.model_name,
-                allow_patterns=["*.safetensors", "*.json", "*.txt", "*.model"],
-                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+
+            if self.device == "auto":
+                device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+            else:
+                device = torch.device(self.device)
+
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                self.model_name,
+                torch_dtype=dtype,
+                device_map={"": device.type},
+                trust_remote_code=True,
             )
-            logger.info("Model cached at: %s", model_path)
-            
-            # Step 4: Param-by-param dispatch from shards (streams weights directly to devices)
-            # This prevents any single 40-50 GiB contiguous buffer allocation
-            logger.info("Loading and dispatching model weights from checkpoint shards...")
-            self.model = load_checkpoint_and_dispatch(
-                self.model,
-                model_path,  # Local path to cached model
-                device_map=self.device,  # Let Accelerate place MPS/CPU shards
-                dtype=dtype,
-                offload_folder=str(offload_dir),  # Push least-hot weights to SSD
-                max_memory=max_memory,  # Cap memory per device
-                no_split_module_classes=[  # Prevent bad mid-layer splits
-                    "QwenDecoderLayer", "QwenMLP", "QwenAttention",
-                    "VisionTransformerLayer", "QwenVisionBlock"
-                ],
-            )
-            
+
+            if device.type == "cpu":
+                self.model = self.model.to(device)
+
+            self.model.eval()
+
             self.processor = AutoProcessor.from_pretrained(
                 self.model_name,
-                trust_remote_code=True
+                trust_remote_code=True,
             )
             logger.info("Model loaded successfully")
 
@@ -171,18 +119,25 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             messages, tokenize=False, add_generation_prompt=True
         )
         
-        image_inputs, video_inputs = process_vision_info(messages)
-        
-        inputs = self.processor(
-            text=[text],
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt",
+        image_inputs, video_inputs, video_kwargs = process_vision_info(
+            messages,
+            return_video_kwargs=True,
         )
         
-        # Move inputs to device
-        inputs = inputs.to(self.model.device)
+        processor_kwargs = {
+            "text": [text],
+            "images": image_inputs,
+            "videos": video_inputs,
+            "padding": True,
+            "return_tensors": "pt",
+        }
+        if video_kwargs:
+            processor_kwargs.update(video_kwargs)
+
+        inputs = self.processor(**processor_kwargs)
+
+        target_device = self.model.get_input_embeddings().weight.device
+        inputs = self._move_to_device(inputs, target_device)
         
         # Generate response
         logger.debug("Generating response from local model")
@@ -208,9 +163,21 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         logger.debug("Model response: %s", output_text[:200])
         return self._parse_response(output_text)
 
+    def _move_to_device(self, data: Union[torch.Tensor, dict, list, tuple], device: torch.device):
+        if isinstance(data, torch.Tensor):
+            return data.to(device)
+        if isinstance(data, dict):
+            return {k: self._move_to_device(v, device) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self._move_to_device(item, device) for item in data]
+        if isinstance(data, tuple):
+            return tuple(self._move_to_device(item, device) for item in data)
+        return data
+
     def _parse_response(self, response_text: str) -> AnalysisResult:
+        cleaned = self._clean_json_response(response_text)
         try:
-            data = json.loads(response_text)
+            data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             logger.warning("Failed to parse JSON response: %s", exc)
             return AnalysisResult(
@@ -258,3 +225,16 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             people=people,
             raw_response=response_text,
         )
+
+    @staticmethod
+    def _clean_json_response(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.strip("`")
+            # Remove optional language hint like ```json
+            first_newline = stripped.find("\n")
+            if first_newline != -1:
+                stripped = stripped[first_newline + 1 :]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+        return stripped.strip()

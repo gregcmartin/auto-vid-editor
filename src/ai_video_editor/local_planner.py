@@ -23,7 +23,7 @@ class LocalDirectorPlanner:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-30B-A3B-MLX-8bit",
+        model_name: str = "Qwen/Qwen3-14B-MLX-4bit",
         device: str = "auto",
         torch_dtype: str = "auto",
         max_context_chars: int = 12000,
@@ -46,50 +46,31 @@ class LocalDirectorPlanner:
         if self.model is None:
             logger.info("Loading local planner model: %s", self.model_name)
             
-            # Set MPS high watermark for better memory management on Apple Silicon
-            import os
-            from pathlib import Path
-            os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
-            
-            # Setup offload directory for weight sharding
-            hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
-            offload_dir = hf_home / "ai_video_editor_offload"
-            offload_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Determine torch dtype
+            if self.device == "auto":
+                device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+            else:
+                device = torch.device(self.device)
+
             if self.torch_dtype == "auto":
-                # Use float16 for MPS (Apple Silicon), bfloat16 for CUDA, float32 for CPU
-                if torch.backends.mps.is_available():
+                if device.type in ("mps", "cuda"):
                     dtype = torch.float16
-                elif torch.cuda.is_available():
-                    dtype = torch.bfloat16
                 else:
                     dtype = torch.float32
-            elif self.torch_dtype == "bfloat16":
-                dtype = torch.bfloat16
             elif self.torch_dtype == "float16":
                 dtype = torch.float16
+            elif self.torch_dtype == "bfloat16":
+                dtype = torch.bfloat16
             else:
                 dtype = torch.float32
-            
-            # Cap memory to force sharding across MPS+CPU instead of single huge buffer
-            max_memory = {
-                "mps": "20GiB",  # Smaller allocation for planner (runs after analysis)
-                "cpu": "32GiB",  # Rest goes to CPU RAM
-            }
-            
-            logger.info("Using dtype: %s, device: %s, offload_dir: %s", dtype, self.device, offload_dir)
-            
-            # Use Accelerate for weight sharding with memory caps and offloading
+
+            logger.info("Using dtype: %s, device: %s", dtype, device)
+
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
+                dtype=dtype,
                 trust_remote_code=True,
-                dtype=dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
-                low_cpu_mem_usage=True,  # Stream weights to avoid big spikes
-                device_map=self.device,  # Let Accelerate shard across mps/cpu
-                offload_folder=str(offload_dir),  # Push least-hot weights to SSD
-                max_memory=max_memory,  # Cap memory to avoid single giant buffer
-            )
+            ).to(device)
+            self.model.eval()
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
             logger.info("Planner model loaded successfully")
 
@@ -142,8 +123,10 @@ class LocalDirectorPlanner:
             clean_up_tokenization_spaces=False
         )[0]
         
-        logger.debug("Planner response: %s", output_text[:200])
-        data = self._safe_load_json(output_text)
+        cleaned_text = self._clean_json_response(output_text)
+
+        logger.debug("Planner response: %s", cleaned_text[:200])
+        data = self._safe_load_json(cleaned_text)
         return EditingPlan.from_dict(data)
 
     def _collect_markdown(
@@ -246,3 +229,15 @@ class LocalDirectorPlanner:
         except json.JSONDecodeError as exc:
             logger.error("Planner returned invalid JSON: %s", exc)
             raise
+
+    @staticmethod
+    def _clean_json_response(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.strip("`")
+            newline = stripped.find("\n")
+            if newline != -1:
+                stripped = stripped[newline + 1 :]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+        return stripped.strip()

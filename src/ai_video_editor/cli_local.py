@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from .analysis.base import VideoAnalyzer
+from .analysis.local_qwen_vl import LocalQwenVideoAnalyzer
 from .analysis.mlx_qwen_vl import MLXQwenVideoAnalyzer
 from .analysis.pipeline import AnalysisPipeline
 from .config import AppConfig
@@ -41,13 +43,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--analysis-model",
         type=str,
-        default="NexaAI/qwen3vl-30B-A3B-mlx",
-        help="MLX model for video analysis (default: NexaAI/qwen3vl-30B-A3B-mlx).",
+        default="mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit",
+        help="Model for video analysis (default: mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit).",
     )
     parser.add_argument(
         "--planner-model",
-        default="Qwen/Qwen3-30B-A3B-MLX-8bit",
-        help="HuggingFace model for planning (default: Qwen/Qwen3-30B-A3B-MLX-8bit).",
+        default="Qwen/Qwen3-14B-MLX-4bit",
+        help="HuggingFace model for planning (default: Qwen/Qwen3-14B-MLX-4bit).",
     )
     parser.add_argument(
         "--device",
@@ -59,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         choices=["auto", "float32", "float16", "bfloat16"],
         help="Torch dtype for models (default: auto - bfloat16 on GPU, float32 on CPU).",
+    )
+    parser.add_argument(
+        "--analysis-backend",
+        default="auto",
+        choices=["auto", "mlx", "torch"],
+        help="Implementation to load the analysis model (default: auto).",
     )
     parser.add_argument(
         "--final-output",
@@ -202,6 +210,65 @@ def discover_music_tracks(music_dir: Optional[Path]) -> List[str]:
     return tracks
 
 
+def build_analyzer(args: argparse.Namespace) -> VideoAnalyzer:
+    """Select the appropriate analysis backend based on CLI options."""
+    backend = args.analysis_backend.lower()
+    prefer_mlx = backend == "mlx"
+    prefer_torch = backend == "torch"
+
+    if backend == "auto":
+        prefer_mlx = args.analysis_model.startswith("mlx-") or args.analysis_model.startswith(
+            "mlx-community/"
+        )
+        if not prefer_mlx:
+            # Default to MLX on Apple Silicon when torch MPS is likely available.
+            import platform
+
+            prefer_mlx = platform.system() == "Darwin"
+
+    if prefer_mlx and not prefer_torch:
+        try:
+            logging.info("Using MLX backend for analysis model.")
+            analyzer = MLXQwenVideoAnalyzer(model_name=args.analysis_model)
+            analyzer.ensure_model_ready()
+            return analyzer
+        except ImportError as exc:
+            logging.warning("Failed to initialise MLX backend (%s); falling back to torch.", exc)
+        except Exception as exc:
+            if backend == "mlx":
+                logging.error("MLX backend initialisation failed: %s", exc, exc_info=True)
+                raise
+            logging.warning(
+                "MLX backend initialisation failed (%s); falling back to torch.", exc, exc_info=True
+            )
+
+    torch_model_name = args.analysis_model
+    if torch_model_name.startswith("mlx-community/"):
+        original = torch_model_name.split("/", 1)[1]
+        mlx_to_torch_map = {
+            "Qwen2-VL-7B-Instruct-4bit": "Qwen/Qwen2-VL-7B-Instruct",
+            "Qwen3-VL-30B-A3B-Thinking-4bit": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        }
+        torch_model_name = mlx_to_torch_map.get(original)
+        if torch_model_name is None:
+            torch_model_name = original
+            if torch_model_name.endswith("-4bit"):
+                torch_model_name = torch_model_name[:-5]
+            torch_model_name = f"Qwen/{torch_model_name}"
+        logging.info(
+            "Requested model %s is MLX-specific; switching to torch-compatible %s",
+            args.analysis_model,
+            torch_model_name,
+        )
+
+    logging.info("Using torch backend for analysis model.")
+    return LocalQwenVideoAnalyzer(
+        model_name=torch_model_name,
+        device=args.device,
+        torch_dtype=args.torch_dtype,
+    )
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -232,8 +299,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         config.final_output = args.final_output
 
     logging.info("Output directory: %s", config.root_output)
-    logging.info("Using local models - Analysis: %s, Planner: %s", 
-                 args.analysis_model, args.planner_model)
+    logging.info(
+        "Using local models - Analysis: %s, Planner: %s",
+        args.analysis_model,
+        args.planner_model,
+    )
 
     splitter = VideoSplitter(ffmpeg=config.ffmpeg, ffprobe=config.ffprobe)
     try:
@@ -242,9 +312,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         logging.error("Video splitting failed: %s", exc)
         return 1
 
-    analyzer = MLXQwenVideoAnalyzer(
-        model_name=args.analysis_model,
-    )
+    try:
+        analyzer = build_analyzer(args)
+        backend_name = "mlx" if isinstance(analyzer, MLXQwenVideoAnalyzer) else "torch"
+        logging.info("Analysis backend selected: %s", backend_name)
+    except Exception as exc:
+        logging.error("Failed to initialise analysis model: %s", exc)
+        return 1
     pipeline = AnalysisPipeline(
         analyzer=analyzer,
         analysis_dir=config.analysis_dir,

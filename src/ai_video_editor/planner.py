@@ -10,10 +10,7 @@ from .editing_plan import EditingPlan
 
 logger = logging.getLogger(__name__)
 
-try:
-    from dashscope import Generation
-except ImportError:  # pragma: no cover
-    Generation = None
+# DashScope integration removed
 
 
 class DirectorPlanner:
@@ -26,15 +23,9 @@ class DirectorPlanner:
         dry_run: bool = False,
         max_context_chars: int = 12000,
     ) -> None:
-        if api_key:
-            os.environ["DASHSCOPE_API_KEY"] = api_key
         self.model = model
         self.dry_run = dry_run
         self.max_context_chars = max_context_chars
-        if not dry_run and Generation is None:
-            raise ImportError(
-                "dashscope Generation API not available. Install dashscope to use the planner."
-            )
 
     def plan(
         self,
@@ -56,22 +47,10 @@ class DirectorPlanner:
 
         messages = self._build_messages(truncated, music_library)
         logger.debug("Requesting plan from model %s", self.model)
-        response = Generation.call(
-            model=self.model,
-            messages=messages,
-            result_format="json",
-        )
+        # DashScope integration removed - using local models only
+        raise RuntimeError("DashScope integration removed. Use local models instead.")
 
-        if response.status_code != 200:
-            raise RuntimeError(f"Planner request failed: {response.message}")
 
-        payload = response.output.get("text") or response.output_text
-        if not payload:
-            raise RuntimeError("Planner response did not include text output.")
-
-        logger.debug("Received planner response.")
-        data = self._safe_load_json(payload)
-        return EditingPlan.from_dict(data)
 
     def _collect_markdown(
         self, analysis_dir: Path, source_chunks: List[Path]

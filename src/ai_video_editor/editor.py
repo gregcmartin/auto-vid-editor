@@ -300,7 +300,11 @@ class FFmpegEditor:
             mix_inputs.append("[a0]")
 
         for idx, cue in enumerate(cues, start=1):
-            music_path = self._resolve_music_track(cue.track)
+            try:
+                music_path = self._resolve_music_track(cue.track)
+            except FFmpegEditorError as exc:
+                logger.warning("Skipping music cue %s: %s", cue.track, exc)
+                continue
             cmd += ["-i", str(music_path)]
 
             start = max(0.0, cue.start)
@@ -328,7 +332,14 @@ class FFmpegEditor:
 
         mix_chain = "".join(mix_inputs) + f"amix=inputs={len(mix_inputs)}:duration=longest:dropout_transition=0[aout]"
         filter_cmds.append(mix_chain)
+        filter_cmds = [cmd for cmd in filter_cmds if cmd and cmd.strip()]
         filter_complex = ";".join(filter_cmds)
+        if not filter_complex.strip():
+            logger.warning("Constructed empty filter graph; copying base video.")
+            self._copy_video(base_video, final_output)
+            return
+
+        logger.debug("Music mix filter graph: %s", filter_complex)
 
         cmd += [
             "-filter_complex",

@@ -35,8 +35,8 @@ echo "Video file: $VIDEO_FILE"
 echo ""
 echo "⚠️  FIRST RUN NOTICE:"
 echo "If this is your first time running with local models,"
-echo "it will download ~30GB of models from HuggingFace."
-echo "This is a ONE-TIME download (10-30 minutes)."
+echo "it will download ~20GB of models from HuggingFace (analysis + planner)."
+echo "This is a ONE-TIME download (depends on your connection)."
 echo "Subsequent runs will be much faster!"
 echo ""
 read -p "Continue? (y/n) " -n 1 -r
@@ -99,7 +99,7 @@ else
     echo "Common issues:"
     echo "  - Model download interrupted (press Ctrl+C to cancel, then retry)"
     echo "  - Out of memory (try --torch-dtype float16 or smaller models)"
-    echo "  - Disk space (need 30GB+ for models)"
+    echo "  - Disk space (need 25GB+ for models)"
     echo ""
 fi
 

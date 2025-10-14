@@ -2,27 +2,18 @@
 
 This project aims to take a single long-form source video and automatically craft an edited cut using ffmpeg driven by large language models.
 
-## Running Locally with MLX (Apple Silicon)
-
-**✅ Recommended for Mac users** - Uses optimized MLX models via NexaSDK:
-- ✅ **Free** - No API costs
-- ✅ **Private** - Videos never leave your machine
-- ✅ **Optimized** - 4-bit quantized models for Apple Silicon
-- ✅ **Memory Efficient** - ~8GB model size vs 60GB
-- See **[LOCAL_MODELS_GUIDE.md](LOCAL_MODELS_GUIDE.md)** for setup
 
 ## Ingredients
 
 ### MLX Models (Apple Silicon - Recommended)
-- **Video analysis: `NexaAI/qwen3vl-30B-A3B-mlx`** (4-bit quantized, ~8GB)
-- **Planning: `Qwen/Qwen3-30B-A3B-MLX-8bit`** (8-bit quantized for Apple Silicon)
-- Framework: [NexaSDK](https://github.com/NexaAI/nexa-sdk) + [MLX](https://github.com/ml-explore/mlx)
+- **Video analysis: `mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit`** (4-bit quantized, ~18GB)
+- **Planning: `Qwen/Qwen3-14B-MLX-4bit`** (4-bit quantized)
+- Framework: [MLX](https://github.com/ml-explore/mlx)
 - **Requirements**: Mac with Apple Silicon (M1/M2/M3), 64GB RAM recommended
 
-### PyTorch Models (GPU/CPU - Alternative)
-- **Video analysis: `Qwen/Qwen3-VL-30B-A3B-Instruct`** (requires 128GB+ RAM or cloud GPU)
-- **Planning: `Qwen/Qwen3-30B-A3B-MLX-8bit`**
-- Framework: [HuggingFace Transformers](https://huggingface.co/docs/transformers)
+- ### MLX Models (Apple optimized)
+- **Video analysis: `mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit`
+- **Planning: `Qwen/Qwen3-14B-MLX-4bit`
 - **Note**: These are Qwen3 models ONLY. Do not use Qwen2 models.
 
 ## Features
@@ -30,8 +21,8 @@ This project aims to take a single long-form source video and automatically craf
 The CLI currently automates the entire post-production loop:
 
 1. **Chunking** – Splits a long source video into evenly sized segments via `ffmpeg`.
-2. **Chunk analysis** – Invokes `NexaAI/qwen3vl-30B-A3B-mlx` (or PyTorch alternative) to describe every segment, highlight dull moments, and capture people metadata into markdown.
-3. **Director plan** – Summarises all chunk reports with `Qwen3-30B-A3B` to produce a structured editing script (JSON + Markdown).
+2. **Chunk analysis** – Invokes Video Analysis agent to describe every segment, highlight dull moments, and capture people metadata into markdown.
+3. **Director plan** – Summarises all chunk reports with Planning agent to produce a structured editing script (JSON + Markdown).
 4. **ffmpeg execution** – Applies trims, optional crops, speed ramps, overlays, subtitles, and background music cues (mixed from the local royalty-free library) to produce polished chunk edits.
 5. **Final assembly** – Concatenates the edited chunks into one final deliverable.
 
@@ -49,10 +40,6 @@ source venv/bin/activate
 # Install the package
 pip install -e .
 
-# Install NexaSDK for MLX support
-pip install nexaai
-```
-
 Process a video end-to-end:
 
 ```bash
@@ -69,12 +56,12 @@ ai-video-editor-local /path/to/video.mp4 \
 
 ### For GPU/CPU (Alternative)
 
-If you have a powerful GPU or cloud instance:
+If you have a powerful GPU
 
 ```bash
 ai-video-editor-local /path/to/video.mp4 \
   --output-dir ./workspace \
-  --analysis-model Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --analysis-model mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit \
   --device cuda \
   --torch-dtype float16
 ```
@@ -96,22 +83,6 @@ Flags of note:
 - `--use-file-picker` opens a Tk-based selector when you'd rather not pass the path on the CLI.
 - `--parts` controls how many chunks to split the video into (default: 4, recommend 16 for long videos)
 
-## Model Information
-
-### Why MLX/NexaSDK?
-
-The MLX framework is specifically optimized for Apple Silicon, providing:
-- **4-bit quantization**: Reduces model size from 60GB to ~8GB
-- **Unified memory**: Efficiently uses Mac's unified memory architecture
-- **Native optimization**: Built for M1/M2/M3 chips
-- **No huge buffers**: Streams weights without massive allocations
-
-### Model Comparison
-
-| Model | Size | Memory | Speed | Platform |
-|-------|------|--------|-------|----------|
-| NexaAI/qwen3vl-30B-A3B-mlx | ~8GB | 64GB RAM | Fast | Mac M1/M2/M3 |
-| Qwen3-VL-30B-A3B-Instruct | ~60GB | 128GB+ RAM | Slow | GPU/Cloud |
 
 ## Development
 
@@ -128,14 +99,7 @@ If you encounter memory errors:
 3. Ensure you have at least 64GB RAM for the 30B model
 
 ### Model Download
-First run will download models (~8GB for MLX version):
+First run will download models:
 - Models are cached in `~/.cache/huggingface/`
-- Download time: 5-15 minutes depending on connection
+- Download time: 30m minutes depending on connection
 - Subsequent runs use cached models
-
-## Roadmap ideas
-
-- Enrich prompt engineering for more precise overlays and camera direction.
-- Add voice-over synthesis hooks aligned with the generated scripts.
-- Bundle optional assets (fonts, LUTs) and ship a Docker/devcontainer for reproducible environments.
-- Support for smaller quantized models (4B/7B variants when available)

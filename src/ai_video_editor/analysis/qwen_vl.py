@@ -10,10 +10,7 @@ from .base import AnalysisResult, PersonProfile, TimelineMoment, VideoAnalyzer
 
 logger = logging.getLogger(__name__)
 
-try:
-    from dashscope import MultiModalConversation
-except ImportError:  # pragma: no cover - optional dependency
-    MultiModalConversation = None
+# DashScope integration removed
 
 
 class QwenVideoAnalyzer(VideoAnalyzer):
@@ -25,14 +22,8 @@ class QwenVideoAnalyzer(VideoAnalyzer):
         api_key: Optional[str] = None,
         dry_run: bool = False,
     ) -> None:
-        if api_key:
-            os.environ["DASHSCOPE_API_KEY"] = api_key
         self.model = model
         self.dry_run = dry_run
-        if not dry_run and MultiModalConversation is None:
-            raise ImportError(
-                "dashscope is not installed. Install it to invoke Qwen models."
-            )
 
     def analyze(self, video_path: Path) -> AnalysisResult:
         logger.info("Analyzing chunk with Qwen: %s", video_path)
@@ -41,20 +32,10 @@ class QwenVideoAnalyzer(VideoAnalyzer):
 
         request = self._build_request_messages(video_path)
         logger.debug("Sending %s request to Qwen", self.model)
-        response = MultiModalConversation.call(
-            model=self.model,
-            messages=request,
-            result_format="json",
-        )
+        # DashScope integration removed - using local models only
+        raise RuntimeError("DashScope integration removed. Use local models instead.")
 
-        if response.status_code != 200:
-            raise RuntimeError(f"Qwen request failed: {response.message}")
 
-        payload = response.output.get("text") or response.output_text
-        if not payload:
-            raise RuntimeError("Qwen response did not include text output.")
-
-        return self._parse_response(payload)
 
     def _build_request_messages(self, video_path: Path) -> List[Dict[str, Any]]:
         file_url = f"file://{video_path.resolve()}"
@@ -143,4 +124,3 @@ class QwenVideoAnalyzer(VideoAnalyzer):
             '"dull_sections":[],"people":[]}}'
         )
         return self._parse_response(placeholder)
-

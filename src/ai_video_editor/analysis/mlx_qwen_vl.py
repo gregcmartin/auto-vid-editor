@@ -27,7 +27,7 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
 
     def __init__(
         self,
-        model_name: str = "NexaAI/qwen3vl-30B-A3B-mlx",
+        model_name: str = "mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit",
         **kwargs
     ) -> None:
         if mx is None:
@@ -40,6 +40,19 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
         self.model = None
         self.processor = None
         self.config = None
+
+    def ensure_model_ready(self) -> None:
+        """
+        Preload the MLX model so that compatibility issues are raised early.
+        """
+        try:
+            self._load_model()
+        except Exception:
+            # Reset partial state so a fallback path can retry cleanly.
+            self.model = None
+            self.processor = None
+            self.config = None
+            raise
         
     def _load_model(self):
         """Lazy load the MLX model on first use."""
@@ -87,19 +100,20 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
         
         # Run inference with video
         logger.debug("Running MLX inference on video")
+        video_source = str(video_path.resolve())
         try:
-            output = generate(
+            generation = generate(
                 self.model,
                 self.processor,
-                str(video_path.resolve()),
                 prompt,
+                video=[video_source],
                 max_tokens=2048,
-                temp=0.7,
-                verbose=False
+                temperature=0.7,
+                verbose=False,
             )
-            
-            logger.debug("Model response: %s", output[:200])
-            return self._parse_response(output)
+            output_text = generation.text if hasattr(generation, "text") else str(generation)
+            logger.debug("Model response: %s", output_text[:200])
+            return self._parse_response(output_text)
             
         except Exception as e:
             logger.error("MLX inference failed: %s", e)
@@ -112,8 +126,9 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
             )
 
     def _parse_response(self, response_text: str) -> AnalysisResult:
+        cleaned = self._clean_json_response(response_text)
         try:
-            data = json.loads(response_text)
+            data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             logger.warning("Failed to parse JSON response: %s", exc)
             return AnalysisResult(
@@ -161,3 +176,15 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
             people=people,
             raw_response=response_text,
         )
+
+    @staticmethod
+    def _clean_json_response(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.strip("`")
+            newline = stripped.find("\n")
+            if newline != -1:
+                stripped = stripped[newline + 1 :]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+        return stripped.strip()
