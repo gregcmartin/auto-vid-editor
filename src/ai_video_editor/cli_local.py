@@ -4,8 +4,9 @@ import argparse
 import json
 import logging
 import sys
+import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
 from .analysis.base import VideoAnalyzer
 from .analysis.local_qwen_vl import LocalQwenVideoAnalyzer
@@ -14,7 +15,13 @@ from .analysis.pipeline import AnalysisPipeline
 from .config import AppConfig
 from .editor import FFmpegEditor, VideoAssembler, FFmpegEditorError
 from .editing_plan import EditingPlan
+from .ffmpeg_utils import (
+    ensure_encoder_available,
+    probe_ffmpeg_encoders,
+    select_video_encoder,
+)
 from .local_planner import LocalDirectorPlanner
+from .mlx_planner import MLXDirectorPlanner
 from .video_splitter import VideoSplitter, VideoSplitterError
 
 
@@ -41,6 +48,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of equal video segments to produce (default: 4).",
     )
     parser.add_argument(
+        "--scene-threshold",
+        type=float,
+        default=0.4,
+        help="Scene detection threshold for analysis (default: 0.4).",
+    )
+    parser.add_argument(
+        "--disable-scene-detection",
+        action="store_true",
+        help="Skip ffmpeg-based scene detection and analyse whole chunks.",
+    )
+    parser.add_argument(
         "--analysis-model",
         type=str,
         default="mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit",
@@ -48,8 +66,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--planner-model",
-        default="Qwen/Qwen3-14B-MLX-4bit",
-        help="HuggingFace model for planning (default: Qwen/Qwen3-14B-MLX-4bit).",
+        default="Qwen/Qwen3-30B-A3B-MLX-8bit",
+        help="Model for planning (default: Qwen/Qwen3-30B-A3B-MLX-8bit).",
     )
     parser.add_argument(
         "--device",
@@ -67,6 +85,67 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         choices=["auto", "mlx", "torch"],
         help="Implementation to load the analysis model (default: auto).",
+    )
+    parser.add_argument(
+        "--analysis-retries",
+        type=int,
+        default=1,
+        help="Number of times to retry analysis if validation fails (default: 1).",
+    )
+    parser.add_argument(
+        "--planner-backend",
+        default="auto",
+        choices=["auto", "mlx", "torch"],
+        help="Implementation to load the planner model (default: auto).",
+    )
+    parser.add_argument(
+        "--transcription-model",
+        dest="transcription_model",
+        default="small",
+        help="Lightning Whisper MLX model size to use for transcription (default: small).",
+    )
+    parser.add_argument(
+        "--whisper-model",
+        dest="transcription_model",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--disable-transcription",
+        dest="enable_transcription",
+        action="store_false",
+        help="Disable audio transcription during analysis.",
+    )
+    parser.add_argument(
+        "--enable-transcription",
+        dest="enable_transcription",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.set_defaults(enable_transcription=True)
+    parser.add_argument(
+        "--disable-audio-analysis",
+        action="store_true",
+        help="Disable audio cue analysis during analysis.",
+    )
+    parser.add_argument(
+        "--video-encoder",
+        default="auto",
+        choices=["auto", "libx264", "h264_videotoolbox", "hevc_videotoolbox"],
+        help=(
+            "Video encoder passed to ffmpeg (default auto: selects VideoToolbox on macOS if "
+            "available, otherwise libx264)."
+        ),
+    )
+    parser.add_argument(
+        "--video-bitrate",
+        default=None,
+        help="Target video bitrate (e.g. 8M) for hardware encoders that do not support CRF.",
+    )
+    parser.add_argument(
+        "--video-quality",
+        type=int,
+        default=None,
+        help="Constant quality value (1-100) for VideoToolbox encoders (higher = better).",
     )
     parser.add_argument(
         "--final-output",
@@ -154,18 +233,36 @@ def ensure_analysis(pipeline: AnalysisPipeline, chunks: list[Path], skip: bool) 
 
 
 def ensure_plan(
-    planner: LocalDirectorPlanner,
+    planner: Any,
     config: AppConfig,
     chunks: list[Path],
     music_library: List[str],
     skip: bool,
+    fallback_factory: Optional[Callable[[], Any]] = None,
+    fallback_label: Optional[str] = None,
 ) -> EditingPlan:
     if skip and config.plan_json.exists():
         logging.info("Skipping planning and loading existing plan: %s", config.plan_json)
         data = json.loads(config.plan_json.read_text())
         return EditingPlan.from_dict(data)
-
-    plan = planner.plan(config.analysis_dir, chunks, music_library)
+    try:
+        plan = planner.plan(config.analysis_dir, chunks, music_library)
+    except Exception as exc:
+        if not fallback_factory:
+            raise
+        logging.warning(
+            "Primary planner failed (%s). Retrying with %s backend.",
+            exc,
+            fallback_label or "fallback",
+        )
+        try:
+            fallback_planner = fallback_factory()
+        except Exception as fallback_exc:  # pragma: no cover - fallback init failure
+            logging.error(
+                "Failed to initialise fallback planner (%s).", fallback_exc, exc_info=True
+            )
+            raise
+        plan = fallback_planner.plan(config.analysis_dir, chunks, music_library)
     config.plan_dir.mkdir(parents=True, exist_ok=True)
     config.plan_json.write_text(json.dumps(plan.to_dict(), indent=2))
     config.plan_markdown.write_text(plan.to_markdown())
@@ -186,7 +283,30 @@ def ensure_editing(
         return
 
     chunk_lookup = {chunk.name: chunk for chunk in chunks}
-    rendered = editor.render(plan, chunk_lookup, config.edited_dir)
+    missing_chunks = [name for name, path in chunk_lookup.items() if not path.exists()]
+    if missing_chunks:
+        raise FFmpegEditorError(f"Missing chunk files for editing: {', '.join(sorted(missing_chunks))}")
+
+    if config.music_dir:
+        missing_tracks = {
+            cue.track
+            for instruction in plan.instructions
+            for cue in instruction.music_cues
+            if cue.track and not (config.music_dir / cue.track).exists()
+        }
+        if missing_tracks:
+            logging.warning(
+                "Music tracks referenced in the plan were not found: %s",
+                ", ".join(sorted(missing_tracks)),
+            )
+
+    progress_manifest = config.edited_dir / "render_manifest.json"
+    rendered = editor.render(
+        plan,
+        chunk_lookup,
+        config.edited_dir,
+        progress_path=progress_manifest,
+    )
     assembler.assemble(rendered, config.final_output)
     logging.info("Final video created at %s", config.final_output)
 
@@ -269,98 +389,228 @@ def build_analyzer(args: argparse.Namespace) -> VideoAnalyzer:
     )
 
 
+def build_planner(args: argparse.Namespace):
+    backend = args.planner_backend.lower()
+    prefer_mlx = backend == "mlx"
+    prefer_torch = backend == "torch"
+
+    def resolve_torch_model(name: str) -> str:
+        if name.startswith("mlx-community/"):
+            original = name.split("/", 1)[1]
+            mlx_to_torch_map = {
+                "Qwen3-4B-Instruct-2507-4bit-DWQ-2510": "Qwen/Qwen3-4B-Instruct",
+                "Qwen3-14B-MLX-4bit": "Qwen/Qwen3-14B-Instruct",
+                "GLM-4.5-Air-4bit": "THUDM/glm-4-9b-chat",
+                "Qwen3-Next-80B-A3B-Instruct-4bit": "Qwen/Qwen3-72B-A3B-Instruct",
+                "Qwen3-30B-A3B-MLX-8bit": "Qwen/Qwen3-30B-A3B-Instruct",
+            }
+            mapped = mlx_to_torch_map.get(original)
+            if mapped:
+                logging.info(
+                    "Planner model %s is MLX-specific; switching fallback to torch-compatible %s",
+                    name,
+                    mapped,
+                )
+                return mapped
+            name = original
+            if name.endswith("-4bit"):
+                name = name[:-5]
+            return f"Qwen/{name}"
+        return name
+
+    if backend == "auto":
+        prefer_mlx = "MLX" in args.planner_model.upper()
+
+    if prefer_mlx and not prefer_torch:
+        try:
+            logging.info("Using MLX backend for planner model.")
+            planner = MLXDirectorPlanner(model_name=args.planner_model)
+            fallback_name = resolve_torch_model(args.planner_model)
+
+            def fallback_factory() -> LocalDirectorPlanner:
+                return LocalDirectorPlanner(
+                    model_name=fallback_name,
+                    device=args.device,
+                    torch_dtype=args.torch_dtype,
+                )
+
+            return planner, "mlx", fallback_factory, "torch"
+        except ImportError as exc:
+            logging.warning(
+                "Failed to initialise MLX planner backend (%s); falling back to torch.",
+                exc,
+            )
+        except Exception as exc:
+            if backend == "mlx":
+                logging.error(
+                    "MLX planner initialisation failed: %s", exc, exc_info=True
+                )
+                raise
+            logging.warning(
+                "MLX planner initialisation failed (%s); falling back to torch.",
+                exc,
+                exc_info=True,
+            )
+
+    planner_model_name = resolve_torch_model(args.planner_model)
+
+    logging.info("Using torch backend for planner model.")
+    planner = LocalDirectorPlanner(
+        model_name=planner_model_name,
+        device=args.device,
+        torch_dtype=args.torch_dtype,
+    )
+    return planner, "torch", None, None
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     configure_logging(args.log_level)
-
+    start_time = time.perf_counter()
     try:
-        video_path = resolve_video_path(args.video, args.use_file_picker)
-    except Exception as exc:
-        logging.error("Failed to determine video path: %s", exc)
-        return 1
+        if args.video_quality is not None and not (1 <= args.video_quality <= 100):
+            logging.error("Video quality must be between 1 and 100.")
+            return 1
 
-    if not video_path.exists():
-        logging.error("Video path not found: %s", video_path)
-        return 1
+        try:
+            video_path = resolve_video_path(args.video, args.use_file_picker)
+        except Exception as exc:
+            logging.error("Failed to determine video path: %s", exc)
+            return 1
 
-    root_output = args.output_dir or video_path.parent / "ai_video_editor_output"
-    default_music_dir = args.music_dir or Path(__file__).resolve().parent.parent.parent / "music"
-    default_music_dir = default_music_dir.expanduser()
-    config = AppConfig.from_paths(
-        video_path=video_path,
-        root_output=root_output,
-        font_path=args.font_path,
-        music_dir=default_music_dir,
-    )
+        if not video_path.exists():
+            logging.error("Video path not found: %s", video_path)
+            return 1
 
-    if args.final_output:
-        config.final_output = args.final_output
+        root_output = args.output_dir or video_path.parent / "ai_video_editor_output"
+        default_music_dir = args.music_dir or Path(__file__).resolve().parent.parent.parent / "music"
+        default_music_dir = default_music_dir.expanduser()
+        config = AppConfig.from_paths(
+            video_path=video_path,
+            root_output=root_output,
+            font_path=args.font_path,
+            music_dir=default_music_dir,
+        )
 
-    logging.info("Output directory: %s", config.root_output)
-    logging.info(
-        "Using local models - Analysis: %s, Planner: %s",
-        args.analysis_model,
-        args.planner_model,
-    )
+        if args.final_output:
+            config.final_output = args.final_output
 
-    splitter = VideoSplitter(ffmpeg=config.ffmpeg, ffprobe=config.ffprobe)
-    try:
-        chunks = splitter.split(video_path, config.chunks_dir, parts=args.parts)
-    except (VideoSplitterError, ValueError, FileNotFoundError) as exc:
-        logging.error("Video splitting failed: %s", exc)
-        return 1
+        available_encoders = probe_ffmpeg_encoders(config.ffmpeg)
+        video_encoder = select_video_encoder(args.video_encoder, available_encoders)
+        resolved_encoder = ensure_encoder_available(video_encoder, available_encoders)
+        if args.video_encoder != "auto" and resolved_encoder != args.video_encoder:
+            logging.warning(
+                "Requested video encoder '%s' unavailable. Falling back to %s.",
+                args.video_encoder,
+                resolved_encoder,
+            )
+        video_encoder = resolved_encoder
 
-    try:
-        analyzer = build_analyzer(args)
-        backend_name = "mlx" if isinstance(analyzer, MLXQwenVideoAnalyzer) else "torch"
-        logging.info("Analysis backend selected: %s", backend_name)
-    except Exception as exc:
-        logging.error("Failed to initialise analysis model: %s", exc)
-        return 1
-    pipeline = AnalysisPipeline(
-        analyzer=analyzer,
-        analysis_dir=config.analysis_dir,
-        people_report_path=config.people_report,
-    )
+        video_quality = args.video_quality
+        video_bitrate = args.video_bitrate
+        if video_quality is not None and video_bitrate is not None:
+            logging.warning(
+                "Both video quality and bitrate specified; using quality and ignoring bitrate."
+            )
+            video_bitrate = None
+        if video_quality is not None and video_encoder not in {"h264_videotoolbox", "hevc_videotoolbox"}:
+            logging.warning(
+                "Selected encoder %s does not support constant quality; ignoring --video-quality.",
+                video_encoder,
+            )
+            video_quality = None
 
-    try:
-        ensure_analysis(pipeline, chunks, args.skip_analysis)
-    except Exception as exc:
-        logging.error("Analysis pipeline failed: %s", exc)
-        return 1
+        logging.info("Output directory: %s", config.root_output)
+        logging.info(
+            "Using local models - Analysis: %s, Planner: %s",
+            args.analysis_model,
+            args.planner_model,
+        )
+        logging.info("Video encoder: %s", video_encoder)
 
-    music_library = discover_music_tracks(config.music_dir)
-    planner = LocalDirectorPlanner(
-        model_name=args.planner_model,
-        device=args.device,
-        torch_dtype=args.torch_dtype,
-    )
+        splitter = VideoSplitter(ffmpeg=config.ffmpeg, ffprobe=config.ffprobe)
+        try:
+            chunks = splitter.split(video_path, config.chunks_dir, parts=args.parts)
+        except (VideoSplitterError, ValueError, FileNotFoundError) as exc:
+            logging.error("Video splitting failed: %s", exc)
+            return 1
 
-    try:
-        plan = ensure_plan(planner, config, chunks, music_library, args.skip_planning)
-    except Exception as exc:
-        logging.error("Planning failed: %s", exc)
-        return 1
+        try:
+            analyzer = build_analyzer(args)
+            backend_name = "mlx" if isinstance(analyzer, MLXQwenVideoAnalyzer) else "torch"
+            logging.info("Analysis backend selected: %s", backend_name)
+        except Exception as exc:
+            logging.error("Failed to initialise analysis model: %s", exc)
+            return 1
+        fallback_analyzer = None
+        if isinstance(analyzer, MLXQwenVideoAnalyzer):
+            fallback_analyzer = LocalQwenVideoAnalyzer(
+                model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
+                device=args.device,
+                torch_dtype=args.torch_dtype,
+            )
+        pipeline = AnalysisPipeline(
+            analyzer=analyzer,
+            analysis_dir=config.analysis_dir,
+            people_report_path=config.people_report,
+            enable_scene_detection=not args.disable_scene_detection,
+            scene_threshold=args.scene_threshold,
+            enable_transcription=args.enable_transcription,
+            whisper_model=args.transcription_model,
+            enable_audio_analysis=not args.disable_audio_analysis,
+            analysis_retries=max(0, args.analysis_retries),
+            fallback_analyzer=fallback_analyzer,
+        )
 
-    editor = FFmpegEditor(
-        ffmpeg=config.ffmpeg,
-        font_path=config.font_path,
-        music_dir=config.music_dir,
-        ffprobe=config.ffprobe,
-        dry_run=False,
-    )
-    assembler = VideoAssembler(ffmpeg=config.ffmpeg, dry_run=False)
+        try:
+            ensure_analysis(pipeline, chunks, args.skip_analysis)
+        except Exception as exc:
+            logging.error("Analysis pipeline failed: %s", exc)
+            return 1
 
-    try:
-        ensure_editing(editor, assembler, plan, chunks, config, args.skip_editing)
-    except (FFmpegEditorError, Exception) as exc:
-        logging.error("Editing/assembly failed: %s", exc)
-        return 1
+        music_library = discover_music_tracks(config.music_dir)
+        planner, planner_backend, planner_fallback_factory, planner_fallback_label = build_planner(args)
+        logging.info("Planner backend selected: %s", planner_backend)
 
-    logging.info("Processing completed. Output located in %s", config.root_output)
-    return 0
+        try:
+            plan = ensure_plan(
+                planner,
+                config,
+                chunks,
+                music_library,
+                args.skip_planning,
+                fallback_factory=planner_fallback_factory,
+                fallback_label=planner_fallback_label,
+            )
+        except Exception as exc:
+            logging.error("Planning failed: %s", exc)
+            return 1
+
+        editor = FFmpegEditor(
+            ffmpeg=config.ffmpeg,
+            font_path=config.font_path,
+            music_dir=config.music_dir,
+            ffprobe=config.ffprobe,
+            dry_run=False,
+            video_encoder=video_encoder,
+            video_bitrate=video_bitrate,
+            video_quality=video_quality,
+        )
+        assembler = VideoAssembler(ffmpeg=config.ffmpeg, dry_run=False)
+
+        try:
+            ensure_editing(editor, assembler, plan, chunks, config, args.skip_editing)
+        except (FFmpegEditorError, Exception) as exc:
+            logging.error("Editing/assembly failed: %s", exc)
+            return 1
+
+        logging.info("Processing completed. Output located in %s", config.root_output)
+        return 0
+    finally:
+        elapsed = time.perf_counter() - start_time
+        logging.info("Total execution time: %.2f seconds", elapsed)
 
 
 if __name__ == "__main__":

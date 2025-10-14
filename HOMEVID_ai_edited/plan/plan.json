@@ -1,0 +1,145 @@
+{
+  "title": "Project Launch Compilation",
+  "summary": "A curated sequence highlighting key moments from multiple video chunks, emphasizing project development milestones and climactic audio peaks.",
+  "outro_text": "Thank you for watching the project launch journey. Stay tuned for future updates!",
+  "voiceover_notes": "Maintain a motivational tone throughout, emphasizing the team's effort and the significance of the project launch.",
+  "warnings": [
+    "Chunk_01: Low confidence in shot breakdown due to static frame analysis",
+    "Chunk_03: Limited visual data available for accurate editing decisions"
+  ],
+  "instructions": [
+    {
+      "chunk": "chunk_01.MP4",
+      "in_start": 0.0,
+      "in_end": 24.32,
+      "label": "Introductory Setup",
+      "speed": 1.0,
+      "keep_audio": true,
+      "crop": {
+        "width": 1920,
+        "height": 1080,
+        "x": 0,
+        "y": 0
+      },
+      "text_overlays": [
+        {
+          "text": "Project Development Phase",
+          "start": 0.0,
+          "end": 24.32,
+          "position": "top_center",
+          "style": "bold"
+        }
+      ],
+      "subtitles": [],
+      "music_cues": [
+        {
+          "track": "ambient-background-loop-chill.mp3",
+          "start": 0.0,
+          "end": 24.32,
+          "volume": -20
+        }
+      ],
+      "notes": "Preserve the audio peak at 0.00s while maintaining static frame continuity"
+    },
+    {
+      "chunk": "chunk_02.MP4",
+      "in_start": 0.0,
+      "in_end": 24.82,
+      "label": "Project Launch Narrative",
+      "speed": 1.0,
+      "keep_audio": true,
+      "crop": {
+        "width": 1920,
+        "height": 1080,
+        "x": 0,
+        "y": 0
+      },
+      "text_overlays": [
+        {
+          "text": "Alex Chen - Lead Developer",
+          "start": 0.0,
+          "end": 24.82,
+          "position": "bottom_right",
+          "style": "italic"
+        }
+      ],
+      "subtitles": [
+        {
+          "text": "We've been working on this project for months.",
+          "start": 0.0,
+          "end": 5.0
+        },
+        {
+          "text": "The team has put in incredible effort.",
+          "start": 5.0,
+          "end": 15.0
+        },
+        {
+          "text": "It's finally ready to launch.",
+          "start": 18.0,
+          "end": 22.0
+        }
+      ],
+      "music_cues": [
+        {
+          "track": "mellow-edm-trap-beat-loop.mp3",
+          "start": 0.0,
+          "end": 5.0,
+          "volume": -18
+        },
+        {
+          "track": "ambient-background-music-uplifting.mp3",
+          "start": 5.0,
+          "end": 15.0,
+          "volume": -16
+        },
+        {
+          "track": "loop-black-box-exciting-bass-loop-130bpm-13888.mp3",
+          "start": 18.0,
+          "end": 22.0,
+          "volume": -12
+        }
+      ],
+      "notes": "Emphasize the audio peak at 18.5s with music crescendo"
+    },
+    {
+      "chunk": "chunk_03.MP4",
+      "in_start": 0.0,
+      "in_end": 24.31,
+      "label": "Climactic Audio Sequence",
+      "speed": 1.0,
+      "keep_audio": true,
+      "crop": {
+        "width": 1920,
+        "height": 1080,
+        "x": 0,
+        "y": 0
+      },
+      "text_overlays": [
+        {
+          "text": "Project Launch Moment",
+          "start": 12.0,
+          "end": 15.0,
+          "position": "center",
+          "style": "bold"
+        }
+      ],
+      "subtitles": [],
+      "music_cues": [
+        {
+          "track": "nostalgia-melody-loop.mp3",
+          "start": 0.0,
+          "end": 10.0,
+          "volume": -22
+        },
+        {
+          "track": "fun-easy-islandy-loop-925bpm.mp3",
+          "start": 10.0,
+          "end": 24.31,
+          "volume": -18
+        }
+      ],
+      "notes": "Highlight the audio peak at 12.00s with visual emphasis"
+    }
+  ]
+}

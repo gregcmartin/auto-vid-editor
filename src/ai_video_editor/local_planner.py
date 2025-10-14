@@ -23,7 +23,7 @@ class LocalDirectorPlanner:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-14B-MLX-4bit",
+        model_name: str = "Qwen/Qwen3-30B-A3B-MLX-8bit",
         device: str = "auto",
         torch_dtype: str = "auto",
         max_context_chars: int = 12000,
@@ -65,11 +65,19 @@ class LocalDirectorPlanner:
 
             logger.info("Using dtype: %s, device: %s", dtype, device)
 
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                dtype=dtype,
-                trust_remote_code=True,
-            ).to(device)
+            try:
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    dtype=dtype,
+                    trust_remote_code=True,
+                ).to(device)
+            except Exception as e:
+                logger.warning("Failed to load with quantization, trying without: %s", e)
+                # Try loading without quantization-specific parameters
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    self.model_name,
+                    trust_remote_code=True,
+                ).to(device).to(dtype)
             self.model.eval()
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
             logger.info("Planner model loaded successfully")
@@ -233,6 +241,11 @@ class LocalDirectorPlanner:
     @staticmethod
     def _clean_json_response(text: str) -> str:
         stripped = text.strip()
+        if "</think>" in stripped:
+            stripped = stripped.split("</think>", 1)[1]
+        elif stripped.startswith("<think>"):
+            stripped = stripped[len("<think>") :]
+        stripped = stripped.strip()
         if stripped.startswith("```"):
             stripped = stripped.strip("`")
             newline = stripped.find("\n")
@@ -240,4 +253,9 @@ class LocalDirectorPlanner:
                 stripped = stripped[newline + 1 :]
         if stripped.endswith("```"):
             stripped = stripped[: stripped.rfind("```")]
-        return stripped.strip()
+        stripped = stripped.strip()
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start != -1 and end != -1 and start < end:
+            return stripped[start : end + 1].strip()
+        return stripped

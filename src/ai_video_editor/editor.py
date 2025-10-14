@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import logging
 import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
@@ -33,27 +35,63 @@ class FFmpegEditor:
         music_dir: Optional[Path] = None,
         ffprobe: str = "ffprobe",
         dry_run: bool = False,
+        max_retries: int = 2,
+        video_encoder: str = "libx264",
+        video_bitrate: Optional[str] = None,
+        video_quality: Optional[int] = None,
     ) -> None:
         self.ffmpeg = ffmpeg
         self.font_path = font_path
         self.music_dir = music_dir
         self.ffprobe = ffprobe
         self.dry_run = dry_run
+        self.max_retries = max(1, max_retries)
+        self.video_encoder = video_encoder
+        self.video_bitrate = video_bitrate
+        self.video_quality = video_quality
+        self._x264_preset = "veryfast"
+        self._x264_crf = 18
 
     def render(
         self,
         plan: EditingPlan,
         chunk_lookup: dict[str, Path],
         output_dir: Path,
+        *,
+        progress_path: Optional[Path] = None,
     ) -> List[Path]:
         output_dir.mkdir(parents=True, exist_ok=True)
         rendered_paths: List[Path] = []
+
+        progress: dict[str, dict[str, object]] = {}
+        if progress_path is not None:
+            progress_path.parent.mkdir(parents=True, exist_ok=True)
+            if progress_path.exists():
+                try:
+                    progress = json.loads(progress_path.read_text())
+                    if not isinstance(progress, dict):
+                        progress = {}
+                except Exception:
+                    progress = {}
 
         with tempfile.TemporaryDirectory() as tmp:
             temp_dir = Path(tmp)
             for index, instruction in enumerate(plan.instructions, start=1):
                 logger.info("Rendering instruction %d/%d", index, len(plan.instructions))
                 output_path = output_dir / self._build_output_name(index, instruction)
+                progress_entry = progress.get(output_path.name) if progress_path else None
+                if (
+                    progress_entry
+                    and progress_entry.get("completed")
+                    and output_path.exists()
+                ):
+                    logger.info(
+                        "Skipping already-rendered segment %s (progress manifest)",
+                        output_path.name,
+                    )
+                    rendered_paths.append(output_path)
+                    continue
+
                 duration = instruction.in_end - instruction.in_start
                 if duration <= 0:
                     raise FFmpegEditorError(
@@ -77,7 +115,7 @@ class FFmpegEditor:
                     subtitle_path=subtitle_path,
                 )
                 rendered_paths.append(output_path)
-                self._run_ffmpeg(cmd, intermediate_path)
+                self._run_ffmpeg(cmd, intermediate_path, purpose=f"segment {index} render")
 
                 if needs_music:
                     self._mix_music(
@@ -89,6 +127,14 @@ class FFmpegEditor:
                     )
                     if not self.dry_run and intermediate_path.exists():
                         intermediate_path.unlink()
+
+                if progress_path is not None:
+                    progress[output_path.name] = {
+                        "chunk": instruction.chunk,
+                        "completed": True,
+                        "timestamp": time.time(),
+                    }
+                    progress_path.write_text(json.dumps(progress, indent=2))
 
         return rendered_paths
 
@@ -163,14 +209,24 @@ class FFmpegEditor:
         else:
             cmd += ["-an"]
 
-        cmd += [
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "18",
-        ]
+        encoder = self.video_encoder or "libx264"
+        cmd += ["-c:v", encoder]
+        if encoder == "libx264":
+            cmd += [
+                "-preset",
+                self._x264_preset,
+                "-crf",
+                str(self._x264_crf),
+            ]
+        else:
+            if self.video_quality is not None:
+                cmd += ["-q:v", str(self.video_quality)]
+            if self.video_bitrate:
+                cmd += ["-b:v", self.video_bitrate]
+            elif self.video_quality is None:
+                # Sensible default bitrate to avoid under-encoding when hardware acceleration is used.
+                cmd += ["-b:v", "8M"]
+
         if instruction.keep_audio:
             cmd += ["-c:a", "aac", "-b:a", "192k"]
 
@@ -251,23 +307,8 @@ class FFmpegEditor:
         }
         return mapping.get(position, mapping["center"])
 
-    def _run_ffmpeg(self, cmd: Sequence[str], output_path: Path) -> None:
-        if self.dry_run:
-            logger.info("Dry-run: %s", " ".join(cmd))
-            output_path.write_text("dry-run placeholder\n")
-            return
-
-        logger.debug("Running ffmpeg: %s", " ".join(cmd))
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise FFmpegEditorError(
-                f"ffmpeg failed ({result.returncode}): {result.stderr.decode().strip()}"
-            )
+    def _run_ffmpeg(self, cmd: Sequence[str], output_path: Path, *, purpose: str) -> None:
+        self._execute_ffmpeg(cmd, output_path, purpose=purpose)
 
     def _mix_music(
         self,
@@ -313,16 +354,12 @@ class FFmpegEditor:
                 continue
             duration = end - start
             label_out = f"[m{idx}]"
-            chain_parts = [
-                f"[{idx}:a]",
-                f"atrim=0:{duration:.3f}",
-                "asetpts=N/SR/TB",
-            ]
+            chain = f"[{idx}:a]atrim=0:{duration:.3f},asetpts=N/SR/TB"
             if cue.volume and cue.volume != 1.0:
-                chain_parts.append(f"volume={cue.volume:.3f}")
+                chain += f",volume={cue.volume:.3f}"
             delay_ms = max(0, int(round(start * 1000)))
-            chain_parts.append(f"adelay={delay_ms}|{delay_ms}")
-            filter_cmds.append(",".join(chain_parts) + label_out)
+            chain += f",adelay={delay_ms}|{delay_ms}{label_out}"
+            filter_cmds.append(chain)
             mix_inputs.append(label_out)
 
         if not mix_inputs:
@@ -357,17 +394,7 @@ class FFmpegEditor:
             str(final_output),
         ]
 
-        logger.debug("Running music mix ffmpeg: %s", " ".join(cmd))
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise FFmpegEditorError(
-                f"ffmpeg music mix failed ({result.returncode}): {result.stderr.decode().strip()}"
-            )
+        self._execute_ffmpeg(cmd, final_output, purpose="music mix")
 
     def _resolve_music_track(self, track: str) -> Path:
         if self.music_dir is None:
@@ -408,13 +435,54 @@ class FFmpegEditor:
         )
         return result.returncode == 0 and bool(result.stdout.strip())
 
+    def _execute_ffmpeg(self, cmd: Sequence[str], output_path: Path, *, purpose: str) -> None:
+        joined = " ".join(cmd)
+        if self.dry_run:
+            logger.info("Dry-run (%s): %s", purpose, joined)
+            output_path.write_text(f"dry-run {purpose}\n")
+            return
+
+        last_error = None
+        for attempt in range(1, self.max_retries + 1):
+            logger.debug("Running ffmpeg (%s attempt %d/%d): %s", purpose, attempt, self.max_retries, joined)
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if result.returncode == 0:
+                return
+            last_error = result.stderr.decode().strip()
+            if attempt < self.max_retries:
+                logger.warning(
+                    "ffmpeg %s failed (attempt %d/%d). Retrying: %s",
+                    purpose,
+                    attempt,
+                    self.max_retries,
+                    last_error,
+                )
+                time.sleep(1)
+            else:
+                break
+
+        raise FFmpegEditorError(
+            f"ffmpeg {purpose} failed after {self.max_retries} attempts: {last_error}"
+        )
+
 
 class VideoAssembler:
     """Combine rendered segments into the final output."""
 
-    def __init__(self, ffmpeg: str = "ffmpeg", dry_run: bool = False) -> None:
+    def __init__(
+        self,
+        ffmpeg: str = "ffmpeg",
+        dry_run: bool = False,
+        max_retries: int = 2,
+    ) -> None:
         self.ffmpeg = ffmpeg
         self.dry_run = dry_run
+        self.max_retries = max(1, max_retries)
 
     def assemble(self, segments: Iterable[Path], output_path: Path) -> None:
         segments = list(segments)
@@ -440,21 +508,38 @@ class VideoAssembler:
                 "copy",
                 str(output_path),
             ]
-            self._run_ffmpeg(cmd, output_path)
+            self._run_ffmpeg(cmd, output_path, purpose="final assembly")
 
-    def _run_ffmpeg(self, cmd: Sequence[str], output_path: Path) -> None:
+    def _run_ffmpeg(self, cmd: Sequence[str], output_path: Path, *, purpose: str) -> None:
+        joined = " ".join(cmd)
         if self.dry_run:
-            logger.info("Dry-run assembly: %s", " ".join(cmd))
-            output_path.write_text("dry-run final placeholder\n")
+            logger.info("Dry-run %s: %s", purpose, joined)
+            output_path.write_text(f"dry-run {purpose}\n")
             return
 
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise FFmpegEditorError(
-                f"ffmpeg concat failed ({result.returncode}): {result.stderr.decode().strip()}"
+        last_error = None
+        for attempt in range(1, self.max_retries + 1):
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
             )
+            if result.returncode == 0:
+                return
+            last_error = result.stderr.decode().strip()
+            if attempt < self.max_retries:
+                logger.warning(
+                    "ffmpeg %s failed (attempt %d/%d). Retrying: %s",
+                    purpose,
+                    attempt,
+                    self.max_retries,
+                    last_error,
+                )
+                time.sleep(1)
+            else:
+                break
+
+        raise FFmpegEditorError(
+            f"ffmpeg {purpose} failed after {self.max_retries} attempts: {last_error}"
+        )

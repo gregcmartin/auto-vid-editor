@@ -65,3 +65,6 @@ workspace/
 # OS
 .DS_Store
 Thumbs.db
+
+# Build dependencies (not part of repo)
+mlx-vlm/

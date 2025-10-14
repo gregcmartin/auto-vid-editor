@@ -33,18 +33,14 @@ fi
 
 echo "Video file: $VIDEO_FILE"
 echo ""
+# Reminder about initial downloads
 echo "⚠️  FIRST RUN NOTICE:"
 echo "If this is your first time running with local models,"
-echo "it will download ~20GB of models from HuggingFace (analysis + planner)."
+echo "the analyser + planner will download 60GB+ of weights from HuggingFace." 
 echo "This is a ONE-TIME download (depends on your connection)."
+echo "Ensure you have sufficient disk space and allow extra time for the first run."
 echo "Subsequent runs will be much faster!"
 echo ""
-read -p "Continue? (y/n) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]
-then
-    exit 1
-fi
 
 # Activate virtual environment
 source venv/bin/activate

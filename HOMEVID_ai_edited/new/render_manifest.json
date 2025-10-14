@@ -1,0 +1,17 @@
+{
+  "01_IntroductorySetup.mp4": {
+    "chunk": "chunk_01.MP4",
+    "completed": true,
+    "timestamp": 1760482193.0112698
+  },
+  "02_ProjectLaunchNarrative.mp4": {
+    "chunk": "chunk_02.MP4",
+    "completed": true,
+    "timestamp": 1760482194.8518221
+  },
+  "03_ClimacticAudioSequence.mp4": {
+    "chunk": "chunk_03.MP4",
+    "completed": true,
+    "timestamp": 1760482196.9366028
+  }
+}

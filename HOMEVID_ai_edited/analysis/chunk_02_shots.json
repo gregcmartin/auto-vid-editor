@@ -1,0 +1,19 @@
+{
+  "shots": [
+    {
+      "start": 0.0,
+      "end": 24.816458,
+      "transcript": null,
+      "audio_highlights": [
+        "Significant audio peak detected"
+      ]
+    }
+  ],
+  "audio_summary": {
+    "mean_volume": -17.5,
+    "max_volume": -0.0,
+    "events": [
+      "Significant audio peak detected"
+    ]
+  }
+}

@@ -19,9 +19,12 @@ local = [
     "accelerate>=0.26.0",
     "qwen-vl-utils",
 ]
+transcription = [
+    "lightning-whisper-mlx>=0.1.0",
+    "soundfile>=0.12",
+]
 
 [project.scripts]
-ai-video-editor = "ai_video_editor.cli:main"
 ai-video-editor-local = "ai_video_editor.cli_local:main"
 
 [tool.setuptools.packages.find]

@@ -2,30 +2,52 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from .editing_plan import EditingPlan
 
 logger = logging.getLogger(__name__)
 
-# DashScope integration removed
+try:
+    from mlx_lm import generate as mlx_generate
+    from mlx_lm import load as mlx_load
+    from mlx_lm.sample_utils import make_sampler
+except ImportError:
+    mlx_generate = None
+    mlx_load = None
+    make_sampler = None
 
 
-class DirectorPlanner:
-    """Invokes a language model to turn analysis markdown into an editing plan."""
+class MLXDirectorPlanner:
+    """Planner implementation backed by mlx-lm models."""
 
     def __init__(
         self,
-        model: str = "Qwen3-30B-A3B",
-        api_key: Optional[str] = None,
-        dry_run: bool = False,
-        max_context_chars: int = 12000,
+        model_name: str = "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit",
+        max_context_chars: int = 60000,
+        temperature: float = 0.7,
+        max_new_tokens: int = 4096,
     ) -> None:
-        self.model = model
-        self.dry_run = dry_run
+        if mlx_load is None or mlx_generate is None or make_sampler is None:
+            raise ImportError(
+                "mlx-lm is required for MLX planner inference. "
+                "Install with: pip install mlx-lm"
+            )
+
+        self.model_name = model_name
         self.max_context_chars = max_context_chars
+        self.temperature = temperature
+        self.max_new_tokens = max_new_tokens
+
+        self.model = None
+        self.tokenizer = None
+
+    def _load_model(self) -> None:
+        if self.model is None:
+            logger.info("Loading MLX planner model: %s", self.model_name)
+            self.model, self.tokenizer = mlx_load(self.model_name)
+            logger.info("Planner model loaded successfully")
 
     def plan(
         self,
@@ -38,22 +60,37 @@ class DirectorPlanner:
         if not source_chunks:
             raise ValueError("source_chunks must contain at least one chunk Path.")
 
+        self._load_model()
+
         context = self._collect_markdown(analysis_dir, source_chunks)
         truncated = self._truncate_context(context)
-
-        if self.dry_run:
-            logger.debug("Planner running in dry-run mode.")
-            return self._mock_plan(truncated, music_library)
-
         messages = self._build_messages(truncated, music_library)
-        logger.debug("Requesting plan from model %s", self.model)
-        # DashScope integration removed - using local models only
-        raise RuntimeError("DashScope integration removed. Use local models instead.")
 
+        prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
 
+        logger.debug("Generating plan from MLX model")
+        sampler = make_sampler(temp=self.temperature)
+        output_text = mlx_generate(
+            self.model,
+            self.tokenizer,
+            prompt,
+            max_tokens=self.max_new_tokens,
+            sampler=sampler,
+        )
+
+        cleaned_text = self._clean_json_response(output_text)
+        logger.debug("Planner response: %s", cleaned_text[:200])
+        data = self._safe_load_json(cleaned_text)
+        return EditingPlan.from_dict(data)
 
     def _collect_markdown(
-        self, analysis_dir: Path, source_chunks: List[Path]
+        self,
+        analysis_dir: Path,
+        source_chunks: List[Path],
     ) -> Dict[str, Dict[str, str]]:
         files = sorted(analysis_dir.glob("*.md"))
         if not files:
@@ -72,7 +109,8 @@ class DirectorPlanner:
         return context
 
     def _truncate_context(
-        self, chunks: Dict[str, Dict[str, str]]
+        self,
+        chunks: Dict[str, Dict[str, str]],
     ) -> Dict[str, Dict[str, str]]:
         total_length = sum(len(entry["content"]) for entry in chunks.values())
         if total_length <= self.max_context_chars:
@@ -96,7 +134,7 @@ class DirectorPlanner:
         self,
         context: Dict[str, Dict[str, str]],
         music_library: List[str],
-    ) -> List[Dict[str, object]]:
+    ) -> List[Dict[str, str]]:
         system_prompt = (
             "You are a seasoned video director creating an edit plan from chunk analyses. "
             "Respond strictly in JSON following the provided schema."
@@ -134,19 +172,15 @@ class DirectorPlanner:
             user_prompt += "\n".join(f"- {track}" for track in music_library)
         else:
             user_prompt += "- (No background music available)"
+
         context_blob = "\n\n".join(
             f"### {info['chunk']} (source: {name})\n{info['content']}"
             for name, info in context.items()
         )
+
         return [
-            {"role": "system", "content": [{"text": system_prompt}]},
-            {
-                "role": "user",
-                "content": [
-                    {"text": user_prompt},
-                    {"text": "Analyses:\n" + context_blob},
-                ],
-            },
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt + "\n\nAnalyses:\n" + context_blob},
         ]
 
     @staticmethod
@@ -157,47 +191,24 @@ class DirectorPlanner:
             logger.error("Planner returned invalid JSON: %s", exc)
             raise
 
-    def _mock_plan(
-        self,
-        context: Dict[str, Dict[str, str]],
-        music_library: List[str],
-    ) -> EditingPlan:
-        first_chunk = next(iter(context.values()))
-        track = music_library[0] if music_library else None
-        sample = {
-            "title": "Sample Dry-Run Edit",
-            "summary": "Mock summary created for testing purposes.",
-            "warnings": [],
-            "instructions": [
-                {
-                    "chunk": first_chunk["chunk"],
-                    "in_start": 0,
-                    "in_end": 30,
-                    "label": "Hook",
-                    "speed": 1.0,
-                    "keep_audio": True,
-                    "text_overlays": [
-                        {
-                            "text": "Dry-run overlay",
-                            "start": 2,
-                            "end": 6,
-                            "position": "bottom_left",
-                        }
-                    ],
-                    "subtitles": [
-                        {"text": "This is a placeholder subtitle.", "start": 4, "end": 8}
-                    ],
-                    "notes": "Replace with real instructions when connected to the model.",
-                }
-            ],
-        }
-        if track:
-            sample["instructions"][0]["music_cues"] = [
-                {
-                    "track": track,
-                    "start": 0,
-                    "end": 25,
-                    "volume": 0.5,
-                }
-            ]
-        return EditingPlan.from_dict(sample)
+    @staticmethod
+    def _clean_json_response(text: str) -> str:
+        stripped = text.strip()
+        if "</think>" in stripped:
+            stripped = stripped.split("</think>", 1)[1]
+        elif stripped.startswith("<think>"):
+            stripped = stripped[len("<think>") :]
+        stripped = stripped.strip()
+        if stripped.startswith("```"):
+            stripped = stripped.strip("`")
+            newline = stripped.find("\n")
+            if newline != -1:
+                stripped = stripped[newline + 1 :]
+        if stripped.endswith("```"):
+            stripped = stripped[: stripped.rfind("```")]
+        stripped = stripped.strip()
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start != -1 and end != -1 and start < end:
+            return stripped[start : end + 1].strip()
+        return stripped
