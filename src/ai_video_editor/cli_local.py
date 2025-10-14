@@ -551,11 +551,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 1
         fallback_analyzer = None
         if isinstance(analyzer, MLXQwenVideoAnalyzer):
-        fallback_analyzer = LocalQwenVideoAnalyzer(
-            model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
-            device="cpu",
-            torch_dtype="float32",
-        )
+            fallback_analyzer = LocalQwenVideoAnalyzer(
+                model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
+                device="cpu",
+                torch_dtype="float32",
+            )
         pipeline = AnalysisPipeline(
             analyzer=analyzer,
             analysis_dir=config.analysis_dir,
