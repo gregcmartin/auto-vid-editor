@@ -34,6 +34,10 @@ class TimelineMoment:
     actions: List[str] = field(default_factory=list)
     confidence: Optional[float] = None
 
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
 
 @dataclass
 class ShotNote:
@@ -153,3 +157,23 @@ class VideoAnalyzer:
         audio_summary: Optional[AudioSummary] = None,
     ) -> AnalysisResult:
         raise NotImplementedError
+
+    def set_retry_hint(self, hint: Optional[str]) -> None:
+        """Provide extra guidance for subsequent analyse calls."""
+        _ = hint  # default noop
+
+    def clear_retry_hint(self) -> None:
+        """Clear any retry guidance."""
+        self.set_retry_hint(None)
+
+    @property
+    def last_raw_response(self) -> Optional[str]:  # pragma: no cover - default noop
+        return getattr(self, "_last_raw_response", None)
+
+
+class AnalysisParseError(RuntimeError):
+    """Raised when the model response cannot be parsed into structured analysis."""
+
+    def __init__(self, message: str, *, raw_response: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response

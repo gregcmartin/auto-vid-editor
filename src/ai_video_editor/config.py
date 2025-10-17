@@ -16,6 +16,9 @@ class AppConfig:
     plan_markdown: Path
     edited_dir: Path
     final_output: Path
+    quality_dir: Path
+    quality_report_json: Path
+    quality_report_markdown: Path
     ffmpeg: str = "ffmpeg"
     ffprobe: str = "ffprobe"
     font_path: Path | None = None
@@ -40,6 +43,9 @@ class AppConfig:
             plan_markdown=root_output / "plan" / "plan.md",
             edited_dir=root_output / "new",
             final_output=root_output / "final_video.mp4",
+            quality_dir=root_output / "quality",
+            quality_report_json=root_output / "quality" / "quality_review.json",
+            quality_report_markdown=root_output / "quality" / "quality_review.md",
             font_path=font_path,
             music_dir=music_dir,
         )

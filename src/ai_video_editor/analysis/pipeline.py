@@ -83,6 +83,11 @@ class AnalysisPipeline:
                     shot.audio_highlights.extend(audio_summary.events)
                     shot.audio_highlights = list(dict.fromkeys(shot.audio_highlights))
 
+            if hasattr(self.analyzer, "clear_retry_hint"):
+                try:
+                    self.analyzer.clear_retry_hint()
+                except Exception:
+                    pass
             result: Optional[AnalysisResult] = None
             warnings: List[str] = []
             for attempt in range(self.analysis_retries + 1):
@@ -90,11 +95,20 @@ class AnalysisPipeline:
                     result = self.analyzer.analyze(chunk, shots, audio_summary)
                 except Exception as exc:
                     logger.error("Primary analyser failed for %s: %s", chunk.name, exc)
+                    raw = getattr(self.analyzer, "last_raw_response", None)
+                    if raw:
+                        self._record_failed_attempt(chunk, attempt, raw_response=raw)
+                        self._update_retry_hint(["non_json_response"])
                     result = None
                 is_valid = False
                 if result is not None:
                     is_valid, warnings = validate_analysis(result, duration)
+                if not is_valid and result is not None:
+                    self._record_failed_attempt(chunk, attempt, result)
+                    self._update_retry_hint(warnings)
                 if is_valid or attempt == self.analysis_retries:
+                    if is_valid:
+                        self._clear_retry_hint()
                     break
                 logger.info(
                     "Analysis validation failed for %s (attempt %d/%d). Retrying with adjusted settings.",
@@ -115,16 +129,15 @@ class AnalysisPipeline:
                 try:
                     result = self.fallback_analyzer.analyze(chunk, shots, audio_summary)
                     _, warnings = validate_analysis(result, duration)
+                    self._clear_retry_hint()
                 except Exception as exc:
                     logger.error("Fallback analyser failed for %s: %s", chunk.name, exc)
-                    result = AnalysisResult(
-                        timeline=[],
-                        dull_sections=[],
-                        people=[],
-                        shot_notes=[],
-                        audio_events=[],
-                        overall_summary=None,
-                        raw_response=str(exc),
+                    result = self._synthesise_default_analysis(
+                        chunk,
+                        shots,
+                        audio_summary,
+                        duration,
+                        fallback_error=str(exc),
                     )
                     warnings = [f"Fallback analyser failed: {exc}"]
 
@@ -133,15 +146,12 @@ class AnalysisPipeline:
                     logger.warning("%s: %s", chunk.name, message)
 
             if result is None:
-                logger.error("No analysis produced for %s; continuing with empty result", chunk.name)
-                result = AnalysisResult(
-                    timeline=[],
-                    dull_sections=[],
-                    people=[],
-                    shot_notes=[],
-                    audio_events=[],
-                    overall_summary=None,
-                    raw_response=None,
+                logger.error("No analysis produced for %s; synthesising minimal result", chunk.name)
+                result = self._synthesise_default_analysis(
+                    chunk,
+                    shots,
+                    audio_summary,
+                    duration,
                 )
             chunk_report = self.analysis_dir / f"{chunk.stem}.md"
             logger.debug("Writing analysis: %s", chunk_report)
@@ -305,6 +315,153 @@ class AnalysisPipeline:
             result.to_markdown(),
         ]
         output_path.write_text("\n".join(lines))
+
+    def _record_failed_attempt(
+        self,
+        chunk_path: Path,
+        attempt: int,
+        result: Optional[AnalysisResult] = None,
+        *,
+        raw_response: Optional[str] = None,
+    ) -> None:
+        raw_payload: Optional[str] = raw_response
+        if raw_payload is None and result is not None:
+            raw_payload = result.raw_response
+        if not raw_payload:
+            return
+        debug_path = self.analysis_dir / f"{chunk_path.stem}_attempt{attempt+1}_raw.json"
+        try:
+            debug_path.write_text(raw_payload)
+        except Exception:
+            logger.debug("Unable to write raw response for %s attempt %d", chunk_path.name, attempt + 1)
+
+    def _update_retry_hint(self, warnings: List[str]) -> None:
+        hint_segments: List[str] = []
+        for message in warnings:
+            lower = message.lower()
+            if "timeline empty" in lower:
+                hint_segments.append(
+                    "Provide at least one timeline entry covering the clip, even if the action is minimal."
+                )
+            if "overall summary missing" in lower:
+                hint_segments.append(
+                    "Add a concise overall_summary describing the clip in plain text."
+                )
+            if "coverage" in lower:
+                hint_segments.append(
+                    "Ensure timeline coverage spans the full clip duration with realistic timestamps."
+                )
+            if "non_json" in lower or "json" in lower:
+                hint_segments.append("Respond with valid JSON only; avoid commentary or explanations.")
+        if not hint_segments:
+            return
+        hint = " ".join(dict.fromkeys(hint_segments))
+        for analyzer in (self.analyzer, self.fallback_analyzer):
+            if analyzer is None:
+                continue
+            try:
+                analyzer.set_retry_hint(hint)
+            except AttributeError:
+                continue
+
+    def _clear_retry_hint(self) -> None:
+        for analyzer in (self.analyzer, self.fallback_analyzer):
+            if analyzer is None:
+                continue
+            try:
+                analyzer.clear_retry_hint()
+            except AttributeError:
+                continue
+
+    def _synthesise_default_analysis(
+        self,
+        chunk: Path,
+        shots: Sequence[ShotSegment],
+        audio_summary: Optional[AudioSummary],
+        duration: float,
+        fallback_error: Optional[str] = None,
+    ) -> AnalysisResult:
+        def _summarise_text(text: Optional[str]) -> str:
+            if not text:
+                return "No transcript available."
+            cleaned = " ".join(text.strip().split())
+            return cleaned[:240] + ("…" if len(cleaned) > 240 else "")
+
+        timeline: List[TimelineMoment] = []
+        shot_notes: List[ShotNote] = []
+
+        for shot in shots:
+            summary = _summarise_text(shot.transcript)
+            notes = None
+            if shot.audio_highlights:
+                notes = "; ".join(dict.fromkeys(shot.audio_highlights))
+            timeline.append(
+                TimelineMoment(
+                    start=shot.start,
+                    end=shot.end,
+                    summary=summary,
+                    notes=notes,
+                    actions=[],
+                    confidence=None,
+                )
+            )
+            shot_notes.append(
+                ShotNote(
+                    start=shot.start,
+                    end=shot.end,
+                    transcript=shot.transcript,
+                    summary=summary,
+                    notable_objects=[],
+                    emotions=None,
+                    confidence=None,
+                )
+            )
+
+        if not timeline:
+            duration = max(duration, 0.0)
+            timeline.append(
+                TimelineMoment(
+                    start=0.0,
+                    end=duration if duration > 0 else 0.0,
+                    summary="Clip segment with limited metadata.",
+                    notes=None,
+                    actions=[],
+                    confidence=None,
+                )
+            )
+
+        audio_events: List[AudioEvent] = []
+        if audio_summary and audio_summary.events:
+            reference_times: List[float] = []
+            if shots:
+                for shot in shots:
+                    reference_times.append(max(0.0, min(duration, (shot.start + shot.end) / 2.0)))
+            else:
+                reference_times.append(max(0.0, min(duration, duration / 2 if duration else 0.0)))
+            for idx, event in enumerate(audio_summary.events):
+                time = reference_times[idx % len(reference_times)]
+                audio_events.append(
+                    AudioEvent(
+                        time=time,
+                        description=event,
+                        confidence=None,
+                    )
+                )
+
+        overall_summary = timeline[0].summary if timeline else "Clip segment"
+        raw_response = None
+        if fallback_error:
+            raw_response = f"SYNTHESISED DUE TO ERROR: {fallback_error}"
+
+        return AnalysisResult(
+            timeline=timeline,
+            dull_sections=[],
+            people=[],
+            shot_notes=shot_notes,
+            audio_events=audio_events,
+            overall_summary=overall_summary,
+            raw_response=raw_response,
+        )
 
     def _write_people_report(
         self,

@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class WhisperTranscriber:
-    def __init__(self, model_name: str = "small") -> None:
+    def __init__(self, model_name: str = "large-v2") -> None:
         try:
             from lightning_whisper_mlx import LightningWhisperMLX  # type: ignore
         except ImportError as exc:  # pragma: no cover - optional dependency
@@ -25,7 +25,7 @@ class WhisperTranscriber:
 
     @classmethod
     def try_create(
-        cls, model_name: str = "small", **kwargs
+        cls, model_name: str = "large-v2", **kwargs
     ) -> Optional["WhisperTranscriber"]:
         try:
             override = kwargs.get("whisper_model")
@@ -37,9 +37,12 @@ class WhisperTranscriber:
     def _load_model(self, model_name: str):
         """Handle constructor signature differences between library versions."""
         try:
-            return self._LightningWhisperMLX(model_name=model_name)
+            return self._LightningWhisperMLX(model_name)
         except TypeError:
-            return self._LightningWhisperMLX(model_size=model_name)
+            try:
+                return self._LightningWhisperMLX(model=model_name)
+            except TypeError:
+                return self._LightningWhisperMLX(model_name)
 
     def transcribe_segment(
         self,
@@ -70,6 +73,7 @@ class WhisperTranscriber:
             if audio_source is None:
                 cmd.append("-vn")
             cmd += [
+                "-y",
                 "-ac",
                 "1",
                 "-ar",

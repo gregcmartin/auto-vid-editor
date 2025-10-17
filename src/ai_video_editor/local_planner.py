@@ -100,37 +100,13 @@ class LocalDirectorPlanner:
         
         messages = self._build_messages(truncated, music_library)
         
-        # Format messages for the model
-        text = self.tokenizer.apply_chat_template(
+        output_text = self.generate_text(
             messages,
-            tokenize=False,
-            add_generation_prompt=True
+            max_new_tokens=4096,
+            temperature=0.7,
+            do_sample=True,
         )
-        
-        # Tokenize and generate
-        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-        
-        logger.debug("Generating plan from local model")
-        with torch.no_grad():
-            generated_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=4096,
-                temperature=0.7,
-                do_sample=True,
-            )
-        
-        # Decode only the generated part
-        generated_ids_trimmed = [
-            out_ids[len(in_ids):] 
-            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
-        
-        output_text = self.tokenizer.batch_decode(
-            generated_ids_trimmed,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False
-        )[0]
-        
+
         cleaned_text = self._clean_json_response(output_text)
 
         logger.debug("Planner response: %s", cleaned_text[:200])
@@ -259,3 +235,54 @@ class LocalDirectorPlanner:
         if start != -1 and end != -1 and start < end:
             return stripped[start : end + 1].strip()
         return stripped
+
+    # ------------------------------------------------------------------ generic generation helpers
+
+    def generate_text(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        max_new_tokens: int = 1024,
+        temperature: float = 0.0,
+        do_sample: bool = False,
+    ) -> str:
+        self._load_model()
+        text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+
+        logger.debug("Generating text with local planner backend")
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=do_sample,
+            )
+
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :]
+            for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+
+        output_text = self.tokenizer.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        return output_text
+
+    def judge_quality(self, system_prompt: str, user_prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return self.generate_text(
+            messages,
+            max_new_tokens=512,
+            temperature=0.0,
+            do_sample=False,
+        )

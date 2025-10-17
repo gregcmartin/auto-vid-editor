@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -9,6 +10,7 @@ from .base import (
     AnalysisResult,
     AudioEvent,
     AudioSummary,
+    AnalysisParseError,
     PersonProfile,
     ShotNote,
     ShotSegment,
@@ -36,9 +38,9 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
 
     def __init__(
         self,
-        model_name: str = "mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit",
-        max_tokens: int = 1536,
-        temperature: float = 0.1,
+        model_name: str = "mlx-community/Qwen3-VL-8B-Thinking-8bit",
+        max_tokens: int = 768,
+        temperature: float = 0.0,
         **kwargs
     ) -> None:
         if mx is None:
@@ -55,6 +57,8 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
         self.temperature = temperature
         self.max_frames_per_shot = 4
         self.max_total_frames = 48
+        self._retry_hint: Optional[str] = None
+        self._last_raw_response: Optional[str] = None
 
     def ensure_model_ready(self) -> None:
         """Preload the MLX model so that compatibility issues are raised early."""
@@ -84,28 +88,51 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
 
         frame_paths = self._frame_inputs(shots)
         system_prompt = (
-            "You are a meticulous assistant helping a video editor. "
-            "Analyse the provided video clip and respond strictly in JSON. "
-            "Use the provided shot breakdown, transcripts, and audio cues to drive your analysis. "
-            "Identify meaningful narrative beats with estimated timestamps, "
-            "flag sections with minimal action suitable for trimming, "
-            "profile each unique person in frame, and capture notable audio events. "
-            "Only describe people, objects, or events you clearly observe in the provided frames."
+            "You are a meticulous assistant helping a video editor.\n"
+            "You must respond with exactly one valid JSON object adhering to the requested schema.\n"
+            "Do not include commentary, markdown, or code fences—return JSON only.\n"
+            "If information is unavailable, use empty lists [] or null."
+        )
+
+        example_json = json.dumps(
+            {
+                "timeline": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "summary": "Example summary",
+                        "notes": None,
+                        "actions": [],
+                        "confidence": 0.9,
+                    }
+                ],
+                "dull_sections": [],
+                "people": [],
+                "shot_notes": [],
+                "audio_events": [],
+                "overall_summary": "Example overview",
+            },
+            indent=2,
         )
 
         user_prompt = (
             "Return a JSON object with the following keys:\n"
-            "timeline: list of objects with keys start, end, summary, notes (optional), actions (string list), confidence (0-1).\n"
-            "dull_sections: list of objects with keys start, end, summary, notes(optional), actions(optional), confidence (0-1).\n"
+            "timeline: list of objects with keys start, end, summary, notes(optional), actions(list[str]), confidence(optional 0-1).\n"
+            "dull_sections: list of objects with keys start, end, summary, notes(optional), actions(optional), confidence(optional 0-1).\n"
             "people: list of objects with keys identifier, appearance, first_seen, last_seen, inferred_name(optional), supporting_evidence(optional).\n"
-            "shot_notes: list of objects with keys start, end, transcript, summary, notable_objects (string list), emotions(optional), confidence (0-1).\n"
-            "audio_events: list of objects with keys time, description, confidence (0-1).\n"
-            "overall_summary: string providing a concise narrative of the clip.\n"
-            "Timestamps must remain within the clip bounds (0 through clip duration) and align with the shot timings.\n"
-            "If you are uncertain about any key, return an empty list or null rather than guessing.\n"
-            "Do NOT invent placeholder people or events.\n"
-            "Ensure the JSON is valid and parsable with double quotes."
+            "shot_notes: list of objects with keys start, end, transcript(optional), summary, notable_objects(list[str]), emotions(optional), confidence(optional 0-1).\n"
+            "audio_events: list of objects with keys time, description, confidence(optional 0-1).\n"
+            "overall_summary: string describing the clip.\n"
+            "Keep all timestamps within the clip bounds and aligned to provided shots.\n"
+            "Do NOT invent placeholder people or ungrounded events.\n"
+            "If the clip feels uneventful, still include one timeline entry covering the full duration explaining what is visible.\n"
+            "The timeline array must contain at least one item and overall_summary must be non-empty.\n"
+            "Respond with JSON ONLY, beginning with '{' and ending with '}'.\n"
+            "Example format:\n"
+            f"{example_json}"
         )
+        if self._retry_hint:
+            user_prompt += f"\nAdditional guidance: {self._retry_hint.strip()}"
 
         shot_context = self._build_shot_context(shots, audio_summary)
 
@@ -114,29 +141,50 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
             {"role": "user", "content": shot_context + "\n\n" + user_prompt},
         ]
 
+        num_images = len(frame_paths)
+        template_kwargs = {}
+        if num_images > 0:
+            template_kwargs["num_images"] = num_images
+        else:
+            template_kwargs["video"] = str(video_path.resolve())
+
         prompt = apply_chat_template(
             self.processor,
             self.config,
             messages,
             add_generation_prompt=True,
+            **template_kwargs,
+        )
+        logger.debug(
+            "MLX prompt prepared (type=%s, len=%s, images=%d)",
+            type(prompt).__name__,
+            len(prompt) if isinstance(prompt, str) else "n/a",
+            num_images,
         )
 
-        logger.debug("Running MLX inference with %d attached frames", len(frame_paths))
+        logger.debug(
+            "Running MLX inference with %d frames. Prompt preview: %s",
+            len(frame_paths),
+            prompt[:400] if isinstance(prompt, str) else str(prompt)[:400],
+        )
         try:
             media_kwargs = {}
             if frame_paths:
-                media_kwargs["image"] = frame_paths
+                media_kwargs["images"] = frame_paths
             else:
                 media_kwargs["video"] = [str(video_path.resolve())]
+            generation_kwargs = {
+                "max_tokens": self.max_tokens,
+                "verbose": False,
+                **media_kwargs,
+            }
+            if self.temperature and self.temperature > 0:
+                generation_kwargs["temperature"] = self.temperature
             generation = generate(
                 self.model,
                 self.processor,
                 prompt,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                top_p=1.0,
-                **media_kwargs,
-                verbose=False,
+                **generation_kwargs,
             )
             output_text = generation.text if hasattr(generation, "text") else str(generation)
             logger.debug("Model response: %s", output_text[:200])
@@ -144,8 +192,19 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
             if not output_text or output_text.strip() == "":
                 raise RuntimeError("MLX analyser returned empty response")
 
-            return self._parse_response(output_text)
+            self._last_raw_response = output_text
+            try:
+                result = self._parse_response(output_text)
+            except AnalysisParseError as parse_exc:
+                if not parse_exc.raw_response:
+                    parse_exc.raw_response = output_text
+                raise
+            except Exception as exc:  # pragma: no cover - defensive
+                raise AnalysisParseError("Failed to parse model response", raw_response=output_text) from exc
+            return result
 
+        except AnalysisParseError:
+            raise
         except Exception as exc:
             logger.error("MLX inference failed: %s", exc)
             return AnalysisResult(
@@ -154,6 +213,14 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
                 people=[],
                 raw_response=f"Error: {str(exc)}",
             )
+
+    # Retry hint plumbing -------------------------------------------------
+
+    def set_retry_hint(self, hint: Optional[str]) -> None:
+        self._retry_hint = hint.strip() if hint else None
+
+    def clear_retry_hint(self) -> None:
+        self._retry_hint = None
 
     def _build_shot_context(
         self,
@@ -197,21 +264,22 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
 
     def _parse_response(self, response_text: str) -> AnalysisResult:
         cleaned = self._clean_json_response(response_text)
+        if cleaned is None:
+            raise AnalysisParseError("Model response did not contain JSON object.", raw_response=response_text)
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            logger.warning("Failed to parse JSON response: %s", exc)
-            return AnalysisResult(
-                timeline=[],
-                dull_sections=[],
-                people=[],
-                raw_response=response_text,
+            logger.warning(
+                "Failed to parse JSON response: %s. Raw snippet: %s",
+                exc,
+                response_text[:500],
             )
+            raise AnalysisParseError(str(exc), raw_response=response_text)
 
         timeline = [
             TimelineMoment(
-                start=float(entry["start"]),
-                end=float(entry["end"]),
+                start=_coerce_required_float(entry.get("start"), "timeline.start"),
+                end=_coerce_required_float(entry.get("end"), "timeline.end"),
                 summary=entry["summary"],
                 notes=entry.get("notes"),
                 actions=list(entry.get("actions", [])),
@@ -221,8 +289,8 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
         ]
         dull_sections = [
             TimelineMoment(
-                start=float(entry["start"]),
-                end=float(entry["end"]),
+                start=_coerce_required_float(entry.get("start"), "dull_sections.start"),
+                end=_coerce_required_float(entry.get("end"), "dull_sections.end"),
                 summary=entry.get("summary", ""),
                 notes=entry.get("notes"),
                 actions=list(entry.get("actions", [])),
@@ -234,8 +302,8 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
             PersonProfile(
                 identifier=entry.get("identifier", "unknown"),
                 appearance=entry.get("appearance", ""),
-                first_seen=float(entry.get("first_seen", 0.0)),
-                last_seen=float(entry.get("last_seen", 0.0)),
+                first_seen=_coerce_required_float(entry.get("first_seen"), "people.first_seen"),
+                last_seen=_coerce_required_float(entry.get("last_seen"), "people.last_seen"),
                 inferred_name=entry.get("inferred_name"),
                 supporting_evidence=entry.get("supporting_evidence"),
             )
@@ -244,8 +312,8 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
 
         shot_notes = [
             ShotNote(
-                start=float(entry.get("start", 0.0)),
-                end=float(entry.get("end", 0.0)),
+                start=_coerce_required_float(entry.get("start"), "shot_notes.start"),
+                end=_coerce_required_float(entry.get("end"), "shot_notes.end"),
                 transcript=entry.get("transcript"),
                 summary=entry.get("summary", ""),
                 notable_objects=list(entry.get("notable_objects", [])),
@@ -257,7 +325,7 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
 
         audio_events = [
             AudioEvent(
-                time=float(entry.get("time", 0.0)),
+                time=_coerce_required_float(entry.get("time"), "audio_events.time"),
                 description=entry.get("description", ""),
                 confidence=_safe_float(entry.get("confidence")),
             )
@@ -277,7 +345,7 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
         )
 
     @staticmethod
-    def _clean_json_response(text: str) -> str:
+    def _clean_json_response(text: str) -> Optional[str]:
         stripped = text.strip()
         if "</think>" in stripped:
             stripped = stripped.split("</think>", 1)[1]
@@ -292,17 +360,64 @@ class MLXQwenVideoAnalyzer(VideoAnalyzer):
         if stripped.endswith("```"):
             stripped = stripped[: stripped.rfind("```")]
         stripped = stripped.strip()
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start != -1 and end != -1 and start < end:
-            return stripped[start : end + 1].strip()
-        return stripped
+        return _extract_first_json_object(stripped)
 
 
 def _safe_float(value: Optional[Union[str, float, int]]) -> Optional[float]:
-    try:
-        if value is None or value == "":
-            return None
-        return float(value)
-    except (TypeError, ValueError):
+    parsed = _parse_float(value)
+    return parsed
+
+
+_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _parse_float(value: Optional[Union[str, float, int]]) -> Optional[float]:
+    if value is None or value == "":
         return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = _NUMBER_PATTERN.search(value)
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def _coerce_required_float(value: Optional[Union[str, float, int]], field: str) -> float:
+    parsed = _parse_float(value)
+    if parsed is None:
+        logger.debug("Field %s missing or invalid (%r); defaulting to 0.0", field, value)
+        return 0.0
+    return parsed
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None

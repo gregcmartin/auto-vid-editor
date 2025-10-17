@@ -25,6 +25,7 @@ from .ffmpeg_utils import (
 )
 from .local_planner import LocalDirectorPlanner
 from .mlx_planner import MLXDirectorPlanner
+from .quality_reviewer import QualityReviewer
 from .video_splitter import VideoSplitter, VideoSplitterError
 
 
@@ -64,8 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--analysis-model",
         type=str,
-        default="mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit",
-        help="Model for video analysis (default: mlx-community/Qwen3-VL-30B-A3B-Thinking-4bit).",
+        default="mlx-community/Qwen3-VL-8B-Thinking-8bit",
+        help="Model for video analysis (default: mlx-community/Qwen3-VL-8B-Thinking-8bit).",
     )
     parser.add_argument(
         "--planner-model",
@@ -104,8 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--transcription-model",
         dest="transcription_model",
-        default="small",
-        help="Lightning Whisper MLX model size to use for transcription (default: small).",
+        default="large-v2",
+        help="Lightning Whisper MLX model size to use for transcription (default: large-v2).",
     )
     parser.add_argument(
         "--whisper-model",
@@ -194,6 +195,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip ffmpeg editing and final assembly (useful for analysis-only runs).",
     )
+    parser.add_argument(
+        "--no-quality-review",
+        dest="quality_review",
+        action="store_false",
+        help="Disable the post-edit quality review stage.",
+    )
+    parser.add_argument(
+        "--quality-model",
+        default=None,
+        help="Optional model to use for the quality judge (defaults to the planner backend when available).",
+    )
+    parser.set_defaults(quality_review=True)
     return parser
 
 
@@ -280,10 +293,10 @@ def ensure_editing(
     chunks: list[Path],
     config: AppConfig,
     skip: bool,
-) -> None:
+) -> list[Path]:
     if skip:
         logging.info("Skipping editing/assembly as requested.")
-        return
+        return []
 
     chunk_lookup = {chunk.name: chunk for chunk in chunks}
     missing_chunks = [name for name, path in chunk_lookup.items() if not path.exists()]
@@ -312,6 +325,7 @@ def ensure_editing(
     )
     assembler.assemble(rendered, config.final_output)
     logging.info("Final video created at %s", config.final_output)
+    return rendered
 
 
 def discover_music_tracks(music_dir: Optional[Path]) -> List[str]:
@@ -371,6 +385,8 @@ def build_analyzer(args: argparse.Namespace) -> VideoAnalyzer:
         mlx_to_torch_map = {
             "Qwen2-VL-7B-Instruct-4bit": "Qwen/Qwen2-VL-7B-Instruct",
             "Qwen3-VL-30B-A3B-Thinking-4bit": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+            "Qwen3-VL-8B-Instruct-bf16": "Qwen/Qwen3-VL-8B-Instruct",
+            "Qwen3-VL-8B-Thinking-8bit": "Qwen/Qwen3-VL-8B-Instruct",
         }
         torch_model_name = mlx_to_torch_map.get(original)
         if torch_model_name is None:
@@ -405,7 +421,7 @@ def build_planner(args: argparse.Namespace):
                 "Qwen3-14B-MLX-4bit": "Qwen/Qwen3-14B-Instruct",
                 "GLM-4.5-Air-4bit": "THUDM/glm-4-9b-chat",
                 "Qwen3-Next-80B-A3B-Instruct-4bit": "Qwen/Qwen3-72B-A3B-Instruct",
-                "Qwen3-30B-A3B-MLX-8bit": "Qwen/Qwen3-30B-A3B-Instruct",
+                "Qwen3-30B-A3B-MLX-8bit": "Qwen/Qwen3-14B-Instruct",
             }
             mapped = mlx_to_torch_map.get(original)
             if mapped:
@@ -552,7 +568,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         fallback_analyzer = None
         if isinstance(analyzer, MLXQwenVideoAnalyzer):
             fallback_analyzer = LocalQwenVideoAnalyzer(
-                model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
+                model_name="Qwen/Qwen2-VL-7B-Instruct",
                 device="cpu",
                 torch_dtype="float32",
             )
@@ -606,10 +622,55 @@ def main(argv: Optional[list[str]] = None) -> int:
         assembler = VideoAssembler(ffmpeg=config.ffmpeg, dry_run=False)
 
         try:
-            ensure_editing(editor, assembler, plan, chunks, config, args.skip_editing)
+            rendered_segments = ensure_editing(editor, assembler, plan, chunks, config, args.skip_editing)
         except (FFmpegEditorError, Exception) as exc:
             logging.error("Editing/assembly failed: %s", exc)
             return 1
+
+        if args.quality_review and not args.skip_editing:
+            try:
+                judge = None
+                if args.quality_model:
+                    quality_model = args.quality_model
+                    if "mlx" in quality_model.lower():
+                        judge = MLXDirectorPlanner(model_name=quality_model)
+                    else:
+                        judge = LocalDirectorPlanner(
+                            model_name=quality_model,
+                            device=args.device,
+                            torch_dtype=args.torch_dtype,
+                        )
+                elif hasattr(planner, "judge_quality"):
+                    judge = planner
+                elif planner_fallback_factory:
+                    try:
+                        candidate = planner_fallback_factory()
+                        if hasattr(candidate, "judge_quality"):
+                            judge = candidate
+                    except Exception as exc:
+                        logging.debug("Unable to initialise fallback quality judge: %s", exc, exc_info=True)
+
+                reviewer = QualityReviewer(
+                    ffprobe=config.ffprobe,
+                    judge=judge,
+                    judge_name=getattr(judge, "model_name", None) if judge else None,
+                )
+                review = reviewer.review(plan, rendered_segments, config.final_output)
+                config.quality_dir.mkdir(parents=True, exist_ok=True)
+                config.quality_report_json.write_text(json.dumps(review.to_dict(), indent=2))
+                config.quality_report_markdown.write_text(review.to_markdown())
+                logging.info(
+                    "Quality review score: %.2f (%s)", review.score, review.verdict
+                )
+                if review.issues:
+                    logging.info(
+                        "Quality issues detected: %s",
+                        "; ".join(issue.message for issue in review.issues),
+                    )
+            except Exception as exc:
+                logging.error("Quality review failed: %s", exc, exc_info=True)
+        elif args.quality_review and args.skip_editing:
+            logging.info("Skipping quality review because editing stage was skipped.")
 
         logging.info("Processing completed. Output located in %s", config.root_output)
         return 0

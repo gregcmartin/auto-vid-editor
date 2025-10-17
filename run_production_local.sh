@@ -1,102 +1,221 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# AI Video Editor - Production Run with Local Models
-# This script processes a real video with full production settings
+set -euo pipefail
 
-echo "=========================================="
-echo "AI Video Editor - Production Local Run"
-echo "=========================================="
-echo ""
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+VENV_DIR="${SCRIPT_DIR}/venv"
+AUTO_CONFIRM=1
+declare -a extra_args
+extra_args=()
 
-# Check if video file is provided
-if [ -z "$1" ]; then
-    echo "ERROR: No video file specified!"
-    echo ""
-    echo "Usage: ./run_production_local.sh <video_file> [options]"
-    echo ""
-    echo "Example:"
-    echo "  ./run_production_local.sh my_video.mp4"
-    echo "  ./run_production_local.sh my_video.mp4 --parts 4"
-    echo "  ./run_production_local.sh my_video.mp4 --device cuda --torch-dtype bfloat16"
-    echo ""
+print_header() {
+    cat <<'EOF'
+==========================================
+AI Video Editor - Production Local Run
+==========================================
+EOF
+}
+
+usage() {
+    cat <<EOF
+Usage: ${SCRIPT_NAME} [-y|--yes] <video_file> [ai-video-editor-local options...]
+
+Examples:
+  ${SCRIPT_NAME} my_video.mp4
+  ${SCRIPT_NAME} -y my_video.mp4 --parts 8 --skip-editing
+  ${SCRIPT_NAME} my_video.mp4 --device cuda --torch-dtype bfloat16
+
+Flags:
+  -y, --yes        Skip the first-run confirmation prompt.
+  -h, --help       Show this message.
+
+All additional arguments are forwarded to 'ai-video-editor-local'.
+EOF
+}
+
+die() {
+    echo "ERROR: $1" >&2
     exit 1
-fi
+}
 
-VIDEO_FILE="$1"
-shift  # Remove first argument, rest are options
+confirm_notice() { :; }
 
-# Check if video file exists
-if [ ! -f "$VIDEO_FILE" ]; then
-    echo "ERROR: Video file not found: $VIDEO_FILE"
-    exit 1
-fi
+activate_venv() {
+    if [[ ! -d "${VENV_DIR}" ]]; then
+        die "Virtual environment not found at ${VENV_DIR}. Run 'python3 -m venv venv && source venv/bin/activate && pip install -e .' first."
+    fi
+    # shellcheck disable=SC1090
+    source "${VENV_DIR}/bin/activate"
+}
 
-echo "Video file: $VIDEO_FILE"
-echo ""
-# Reminder about initial downloads
-echo "⚠️  FIRST RUN NOTICE:"
-echo "If this is your first time running with local models,"
-echo "the analyser + planner will download 60GB+ of weights from HuggingFace." 
-echo "This is a ONE-TIME download (depends on your connection)."
-echo "Ensure you have sufficient disk space and allow extra time for the first run."
-echo "Subsequent runs will be much faster!"
-echo ""
+ensure_file() {
+    local path="$1"
+    [[ -f "${path}" ]] || die "Video file not found: ${path}"
+}
 
-# Activate virtual environment
-source venv/bin/activate
+resolve_output_dir() {
+    local video_path="$1"
+    local override=""
 
-# Get video filename without extension for output directory
-BASENAME=$(basename "$VIDEO_FILE" | sed 's/\.[^.]*$//')
-OUTPUT_DIR="${BASENAME}_ai_edited"
+    for ((idx=0; idx<${#extra_args[@]}; idx++)); do
+        local value="${extra_args[$idx]}"
+        if [[ "${value}" == "--output-dir" || "${value}" == "-o" ]]; then
+            local next_idx=$((idx + 1))
+            if (( next_idx < ${#extra_args[@]} )); then
+                override="${extra_args[$next_idx]}"
+            fi
+        fi
+    done
 
-echo ""
-echo "=========================================="
-echo "Starting Production Processing"
-echo "=========================================="
-echo "Output directory: $OUTPUT_DIR"
-echo "Additional options: $@"
-echo ""
+    if [[ -n "${override}" ]]; then
+        echo "${override}"
+        return
+    fi
 
-# Run with production settings
-ai-video-editor-local "$VIDEO_FILE" \
-  --output-dir "$OUTPUT_DIR" \
-  --device auto \
-  --torch-dtype auto \
-  --log-level INFO \
-  "$@"
+    local base
+    base=$(basename "${video_path}")
+    base="${base%.*}"
+    override="${base}_ai_edited"
+    if (( ${#extra_args[@]} > 0 )); then
+        extra_args=("--output-dir" "${override}" "${extra_args[@]}")
+    else
+        extra_args=("--output-dir" "${override}")
+    fi
+    echo "${override}"
+}
 
-EXIT_CODE=$?
+ensure_option() {
+    local flag="$1"
+    local value="$2"
+    local found=0
+    for ((idx=0; idx<${#extra_args[@]}; idx++)); do
+        if [[ "${extra_args[$idx]}" == "${flag}" ]]; then
+            found=1
+            break
+        fi
+    done
+    if (( found == 0 )); then
+        extra_args+=("${flag}" "${value}")
+    fi
+}
 
-if [ $EXIT_CODE -eq 0 ]; then
+summarize_success() {
+    local output_dir="$1"
+    cat <<EOF
+
+==========================================
+✅ Processing Complete!
+==========================================
+
+Output location: ${output_dir}/
+
+Generated files:
+  📁 chunks/        - Video segments
+  📁 analysis/      - AI analysis reports
+  📁 plan/          - Editing plan (JSON + Markdown)
+  📁 new/           - Edited segments
+  🎬 final_video.mp4 - Your finished video!
+
+To view the final video:
+  open "${output_dir}/final_video.mp4"
+EOF
+}
+
+summarize_failure() {
+    local exit_code="$1"
+    cat <<EOF
+
+==========================================
+❌ Processing Failed
+==========================================
+Exit code: ${exit_code}
+
+Common issues:
+  - Model download interrupted (press Ctrl+C to cancel, then retry)
+  - Out of memory (try --torch-dtype float16 or smaller models)
+  - Disk space (need 25GB+ for models)
+EOF
+}
+
+main() {
+    print_header
+
+    extra_args=()
+    local video_file=""
+
+    while (( $# )); do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            -y|--yes)
+                AUTO_CONFIRM=1
+                ;;
+            --)
+                shift
+                extra_args+=("$@")
+                break
+                ;;
+            -*)
+                extra_args+=("$1")
+                ;;
+            *)
+                if [[ -z "${video_file}" ]]; then
+                    video_file="$1"
+                else
+                    extra_args+=("$1")
+                fi
+                ;;
+        esac
+        shift || true
+    done
+
+    if [[ -z "${video_file}" ]]; then
+        usage
+        exit 1
+    fi
+
+    ensure_file "${video_file}"
+
+    confirm_notice
+    activate_venv
+
+    local output_dir
+    output_dir=$(resolve_output_dir "${video_file}")
+
+    ensure_option "--device" "auto"
+    ensure_option "--torch-dtype" "auto"
+    ensure_option "--log-level" "INFO"
+
+    echo "Video file: ${video_file}"
     echo ""
     echo "=========================================="
-    echo "✅ Processing Complete!"
+    echo "Starting Production Processing"
     echo "=========================================="
+    echo "Output directory: ${output_dir}"
+    if (( ${#extra_args[@]} > 0 )); then
+        echo "Additional options: ${extra_args[*]}"
+    else
+        echo "Additional options: (none)"
+    fi
     echo ""
-    echo "Output location: $OUTPUT_DIR/"
-    echo ""
-    echo "Generated files:"
-    echo "  📁 chunks/        - Video segments"
-    echo "  📁 analysis/      - AI analysis reports"
-    echo "  📁 plan/          - Editing plan (JSON + Markdown)"
-    echo "  📁 new/           - Edited segments"
-    echo "  🎬 final_video.mp4 - Your finished video!"
-    echo ""
-    echo "To view the final video:"
-    echo "  open $OUTPUT_DIR/final_video.mp4"
-    echo ""
-else
-    echo ""
-    echo "=========================================="
-    echo "❌ Processing Failed"
-    echo "=========================================="
-    echo "Exit code: $EXIT_CODE"
-    echo ""
-    echo "Common issues:"
-    echo "  - Model download interrupted (press Ctrl+C to cancel, then retry)"
-    echo "  - Out of memory (try --torch-dtype float16 or smaller models)"
-    echo "  - Disk space (need 25GB+ for models)"
-    echo ""
-fi
 
-exit $EXIT_CODE
+    if ! command -v ai-video-editor-local >/dev/null 2>&1; then
+        die "'ai-video-editor-local' not found. Ensure the project is installed into the virtual environment."
+    fi
+
+    ai-video-editor-local "${video_file}" "${extra_args[@]}"
+    local exit_code=$?
+
+    if [[ "${exit_code}" -eq 0 ]]; then
+        summarize_success "${output_dir}"
+    else
+        summarize_failure "${exit_code}"
+    fi
+
+    exit "${exit_code}"
+}
+
+main "$@"

@@ -66,21 +66,7 @@ class MLXDirectorPlanner:
         truncated = self._truncate_context(context)
         messages = self._build_messages(truncated, music_library)
 
-        prompt = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-
-        logger.debug("Generating plan from MLX model")
-        sampler = make_sampler(temp=self.temperature)
-        output_text = mlx_generate(
-            self.model,
-            self.tokenizer,
-            prompt,
-            max_tokens=self.max_new_tokens,
-            sampler=sampler,
-        )
+        output_text = self.generate_text(messages, max_tokens=self.max_new_tokens, temperature=self.temperature)
 
         cleaned_text = self._clean_json_response(output_text)
         logger.debug("Planner response: %s", cleaned_text[:200])
@@ -212,3 +198,38 @@ class MLXDirectorPlanner:
         if start != -1 and end != -1 and start < end:
             return stripped[start : end + 1].strip()
         return stripped
+
+    # ------------------------------------------------------------------ generic generation helpers
+
+    def _build_prompt(self, messages: List[Dict[str, str]]) -> str:
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    def generate_text(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+    ) -> str:
+        self._load_model()
+        prompt = self._build_prompt(messages)
+        sampler = make_sampler(temp=temperature)
+        logger.debug("Generating text with MLX planner backend")
+        return mlx_generate(
+            self.model,
+            self.tokenizer,
+            prompt,
+            max_tokens=max_tokens,
+            sampler=sampler,
+        )
+
+    def judge_quality(self, system_prompt: str, user_prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        return self.generate_text(messages, max_tokens=512, temperature=0.0)

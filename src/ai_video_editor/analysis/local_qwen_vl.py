@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -9,6 +10,7 @@ from .base import (
     AnalysisResult,
     AudioEvent,
     AudioSummary,
+    AnalysisParseError,
     PersonProfile,
     ShotNote,
     ShotSegment,
@@ -34,11 +36,11 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-VL-30B-A3B-Instruct",
+        model_name: str = "Qwen/Qwen3-VL-8B-Instruct",
         device: str = "auto",
         torch_dtype: str = "auto",
-        max_new_tokens: int = 1536,
-        temperature: float = 0.1,
+        max_new_tokens: int = 1024,
+        temperature: float = 0.0,
     ) -> None:
         if AutoModelForImageTextToText is None or torch is None:
             raise ImportError(
@@ -55,6 +57,8 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         self.temperature = temperature
         self.max_frames_per_shot = 4
         self.max_total_frames = 48
+        self._retry_hint: Optional[str] = None
+        self._last_raw_response: Optional[str] = None
         
     def _load_model(self):
         """Lazy load the model on first use."""
@@ -105,28 +109,51 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         frame_inputs = self._frame_inputs(shots)
 
         system_prompt = (
-            "You are a meticulous assistant helping a video editor. "
-            "Analyse the provided video clip and respond strictly in JSON. "
-            "Use the provided shot breakdown, transcripts, and audio cues to drive your analysis. "
-            "Identify meaningful narrative beats with estimated timestamps, "
-            "flag sections with minimal action suitable for trimming, "
-            "profile each unique person in frame, and capture notable audio events. "
-            "Only describe people, objects, or events that are clearly visible in the provided frames."
+            "You are a meticulous assistant helping a video editor.\n"
+            "You must respond with exactly one valid JSON object that matches the requested schema.\n"
+            "Do not include explanations, markdown, code fences, or any text outside the JSON object.\n"
+            "If a field is unknown, use an empty list [] or null."
+        )
+
+        example_json = json.dumps(
+            {
+                "timeline": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "summary": "Example summary",
+                        "notes": None,
+                        "actions": [],
+                        "confidence": 0.9,
+                    }
+                ],
+                "dull_sections": [],
+                "people": [],
+                "shot_notes": [],
+                "audio_events": [],
+                "overall_summary": "Example overview",
+            },
+            indent=2,
         )
 
         user_prompt = (
             "Return a JSON object with the following keys:\n"
-            "timeline: list of objects with keys start, end, summary, notes (optional), actions (string list), confidence (0-1).\n"
-            "dull_sections: list of objects with keys start, end, summary, notes(optional), actions(optional), confidence (0-1).\n"
+            "timeline: list of objects with keys start, end, summary, notes(optional), actions(list[str]), confidence(0-1).\n"
+            "dull_sections: list of objects with keys start, end, summary, notes(optional), actions(optional), confidence(0-1).\n"
             "people: list of objects with keys identifier, appearance, first_seen, last_seen, inferred_name(optional), supporting_evidence(optional).\n"
-            "shot_notes: list of objects with keys start, end, transcript, summary, notable_objects (string list), emotions(optional), confidence (0-1).\n"
-            "audio_events: list of objects with keys time, description, confidence (0-1).\n"
-            "overall_summary: string providing a concise narrative of the clip.\n"
-            "Timestamps must fall within the clip bounds (0 through clip duration) and align with the provided shot timings.\n"
-            "If you are uncertain about any field, return an empty list or null instead of inventing content.\n"
-            "Do NOT create placeholder individuals (e.g. \"Person A\") or events that are not grounded in the supplied frames and transcripts.\n"
-            "All strings must be plain text without markdown. Ensure the JSON is valid and parsable with double quotes."
+            "shot_notes: list of objects with keys start, end, transcript(optional), summary, notable_objects(list[str]), emotions(optional), confidence(0-1).\n"
+            "audio_events: list of objects with keys time, description, confidence(optional, 0-1).\n"
+            "overall_summary: string narrative for the clip.\n"
+            "Timestamps must remain within the clip bounds and align with the provided shot timings.\n"
+            "Do NOT invent placeholder people or ungrounded events.\n"
+            "If nothing notable occurs, still provide one timeline entry covering the full clip duration describing what is visible.\n"
+            "The `timeline` array MUST contain at least one item, and `overall_summary` must be a non-empty string.\n"
+            "Respond with JSON ONLY, starting with '{' and ending with '}'.\n"
+            "Example format:\n"
+            f"{example_json}"
         )
+        if self._retry_hint:
+            user_prompt += f"\nAdditional guidance: {self._retry_hint.strip()}"
 
         user_content = [{"type": "text", "text": shot_context}]
         user_content.extend(frame_inputs)
@@ -170,14 +197,15 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         
         # Generate response
         logger.debug("Generating response from local model")
+        generation_args = {
+            **inputs,
+            "max_new_tokens": self.max_new_tokens,
+            "do_sample": False,
+        }
+        if self.temperature and self.temperature > 0:
+            generation_args["temperature"] = self.temperature
         with torch.no_grad():
-            generated_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                temperature=self.temperature,
-                do_sample=False,
-                top_p=1.0,
-            )
+            generated_ids = self.model.generate(**generation_args)
         
         # Trim the input tokens from generated output
         generated_ids_trimmed = [
@@ -192,7 +220,24 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         )[0]
         
         logger.debug("Model response: %s", output_text[:200])
-        return self._parse_response(output_text)
+        self._last_raw_response = output_text
+        try:
+            result = self._parse_response(output_text)
+        except AnalysisParseError as exc:
+            if not exc.raw_response:
+                exc.raw_response = output_text
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            raise AnalysisParseError("Failed to parse model response", raw_response=output_text) from exc
+        return result
+
+    # Retry hint plumbing -------------------------------------------------
+
+    def set_retry_hint(self, hint: Optional[str]) -> None:
+        self._retry_hint = hint.strip() if hint else None
+
+    def clear_retry_hint(self) -> None:
+        self._retry_hint = None
 
     def _build_shot_context(
         self,
@@ -254,21 +299,22 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
 
     def _parse_response(self, response_text: str) -> AnalysisResult:
         cleaned = self._clean_json_response(response_text)
+        if cleaned is None:
+            raise AnalysisParseError("Model response did not contain JSON object.", raw_response=response_text)
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            logger.warning("Failed to parse JSON response: %s", exc)
-            return AnalysisResult(
-                timeline=[],
-                dull_sections=[],
-                people=[],
-                raw_response=response_text,
+            logger.warning(
+                "Failed to parse JSON response: %s. Raw snippet: %s",
+                exc,
+                response_text[:500],
             )
+            raise AnalysisParseError(str(exc), raw_response=response_text)
 
         timeline = [
             TimelineMoment(
-                start=float(entry["start"]),
-                end=float(entry["end"]),
+                start=_coerce_required_float(entry.get("start"), "timeline.start"),
+                end=_coerce_required_float(entry.get("end"), "timeline.end"),
                 summary=entry["summary"],
                 notes=entry.get("notes"),
                 actions=list(entry.get("actions", [])),
@@ -278,8 +324,8 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         ]
         dull_sections = [
             TimelineMoment(
-                start=float(entry["start"]),
-                end=float(entry["end"]),
+                start=_coerce_required_float(entry.get("start"), "dull_sections.start"),
+                end=_coerce_required_float(entry.get("end"), "dull_sections.end"),
                 summary=entry.get("summary", ""),
                 notes=entry.get("notes"),
                 actions=list(entry.get("actions", [])),
@@ -291,8 +337,8 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
             PersonProfile(
                 identifier=entry.get("identifier", "unknown"),
                 appearance=entry.get("appearance", ""),
-                first_seen=float(entry.get("first_seen", 0.0)),
-                last_seen=float(entry.get("last_seen", 0.0)),
+                first_seen=_coerce_required_float(entry.get("first_seen"), "people.first_seen"),
+                last_seen=_coerce_required_float(entry.get("last_seen"), "people.last_seen"),
                 inferred_name=entry.get("inferred_name"),
                 supporting_evidence=entry.get("supporting_evidence"),
             )
@@ -301,8 +347,8 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
 
         shot_notes = [
             ShotNote(
-                start=float(entry.get("start", 0.0)),
-                end=float(entry.get("end", 0.0)),
+                start=_coerce_required_float(entry.get("start"), "shot_notes.start"),
+                end=_coerce_required_float(entry.get("end"), "shot_notes.end"),
                 transcript=entry.get("transcript"),
                 summary=entry.get("summary", ""),
                 notable_objects=list(entry.get("notable_objects", [])),
@@ -314,7 +360,7 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
 
         audio_events = [
             AudioEvent(
-                time=float(entry.get("time", 0.0)),
+                time=_coerce_required_float(entry.get("time"), "audio_events.time"),
                 description=entry.get("description", ""),
                 confidence=_safe_float(entry.get("confidence")),
             )
@@ -334,7 +380,7 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         )
 
     @staticmethod
-    def _clean_json_response(text: str) -> str:
+    def _clean_json_response(text: str) -> Optional[str]:
         stripped = text.strip()
         if "</think>" in stripped:
             stripped = stripped.split("</think>", 1)[1]
@@ -349,17 +395,64 @@ class LocalQwenVideoAnalyzer(VideoAnalyzer):
         if stripped.endswith("```"):
             stripped = stripped[: stripped.rfind("```")]
         stripped = stripped.strip()
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start != -1 and end != -1 and start < end:
-            return stripped[start : end + 1].strip()
-        return stripped
+        return _extract_first_json_object(stripped)
 
 
 def _safe_float(value: Optional[Union[str, float, int]]) -> Optional[float]:
-    try:
-        if value is None or value == "":
-            return None
-        return float(value)
-    except (TypeError, ValueError):
+    parsed = _parse_float(value)
+    return parsed
+
+
+_NUMBER_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _parse_float(value: Optional[Union[str, float, int]]) -> Optional[float]:
+    if value is None or value == "":
         return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = _NUMBER_PATTERN.search(value)
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def _coerce_required_float(value: Optional[Union[str, float, int]], field: str) -> float:
+    parsed = _parse_float(value)
+    if parsed is None:
+        logger.debug("Field %s missing or invalid (%r); defaulting to 0.0", field, value)
+        return 0.0
+    return parsed
+
+
+def _extract_first_json_object(text: str) -> Optional[str]:
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return None
